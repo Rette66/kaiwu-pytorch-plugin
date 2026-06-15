@@ -76,7 +76,6 @@ def save_checkpoint(
                 # Proposal weights are intentionally omitted because the current
                 # example treats proposal DPLM as a frozen upstream component.
                 "energy_encoder": generator.energy_model.encoder.backbone.state_dict(),
-                "feature_projector": generator.energy_model.feature_projector.state_dict(),
                 **_energy_backend_state(generator),
             },
         },
@@ -94,8 +93,5 @@ def load_trained_energy_weights(
     # Rebuild exactly the energy-side modules we saved during training so rerun
     # and evaluation use the same scorer weights as the best checkpoint.
     generator.energy_model.encoder.backbone.load_state_dict(state_dict["energy_encoder"])
-    generator.energy_model.feature_projector.load_state_dict(
-        state_dict["feature_projector"]
-    )
     generator.energy_model.energy_bm.load_state_dict(state_dict["energy_bm"])
     return checkpoint.get("metadata", {})

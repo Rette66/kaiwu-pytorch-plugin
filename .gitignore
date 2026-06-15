@@ -170,3 +170,6 @@ example/qvae_cell/output*/
 example/qdiffusion/graph/
 *.h5ad
 article.md
+example/qdiffusion/outputs
+example/qdiffusion/bm_rbm_cim_standalone
+*.svg

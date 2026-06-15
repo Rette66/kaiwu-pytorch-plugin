@@ -37,7 +37,11 @@ class BMConditionedEnergyModel(EnergyModel):
             sampler=bm_sampler,
         )
         self.encoder = encoder
-        self.feature_projector = nn.Linear(2 * encoder.hidden_size, bm_num_visible)
+        if bm_num_visible > 2 * encoder.hidden_size:
+            raise ValueError(
+                "bm_num_visible cannot exceed the conditioned DPLM feature size "
+                f"({2 * encoder.hidden_size})."
+            )
 
     def build_conditioned_features(
         self,
@@ -66,14 +70,13 @@ class BMConditionedEnergyModel(EnergyModel):
         candidate_tokens: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        # The projector turns one concatenated sequence feature into the visible
-        # part of the BM state before discretization/sampling steps.
+        # Use the DPLM conditioned feature directly as BM visible logits.
         conditioned_features = self.build_conditioned_features(
             noisy_tokens=noisy_tokens,
             candidate_tokens=candidate_tokens,
             attention_mask=attention_mask,
         )
-        return self.feature_projector(conditioned_features)
+        return conditioned_features[:, : self.bm_num_visible]
 
     def score_conditioned(
         self,
