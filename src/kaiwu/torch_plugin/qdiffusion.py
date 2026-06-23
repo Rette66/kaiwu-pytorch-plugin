@@ -92,7 +92,10 @@ class EnergyModel(nn.Module):
         self.sampler = sampler
         self._last_stats: dict[str, torch.Tensor] = {}
         if bm_num_visible is not None and bm_num_hidden is not None:
-            self.energy_bm = BoltzmannMachine(num_nodes=bm_num_visible + bm_num_hidden)
+            self.energy_bm = BoltzmannMachine(
+                num_visible=bm_num_visible,
+                num_hidden=bm_num_hidden,
+            )
 
     def forward(
         self,
