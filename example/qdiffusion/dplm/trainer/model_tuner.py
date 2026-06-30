@@ -14,7 +14,7 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-try:
+if __package__ not in {None, "", "trainer"}:
     from ..utils.io import (
         normalize_decoded_sequence,
         save_markdown,
@@ -23,7 +23,7 @@ try:
     )
     from ..utils.metrics import QualitySummary
     from ..utils.runtime import encode_sequence, seed_torch
-except ImportError:  # pragma: no cover - direct script-path compatibility
+else:  # pragma: no cover - direct script-path compatibility
     from utils.io import (
         normalize_decoded_sequence,
         save_markdown,

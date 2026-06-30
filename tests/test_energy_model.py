@@ -1,92 +1,100 @@
-import os
+import importlib.util
+from pathlib import Path
 import sys
+import types
 import unittest
 
-import numpy as np
 import torch
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
-from kaiwu.torch_plugin import EnergyModel
+def import_local_qdiffusion():
+    """Loads the current checkout instead of an installed kaiwu package."""
+    root = Path(__file__).resolve().parents[1] / "src"
+    previous_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "kaiwu" or name.startswith("kaiwu.")
+    }
+    for module_name in list(sys.modules):
+        if module_name == "kaiwu" or module_name.startswith("kaiwu."):
+            del sys.modules[module_name]
+    try:
+        kaiwu_module = types.ModuleType("kaiwu")
+        kaiwu_module.__path__ = [str(root / "kaiwu")]
+        sys.modules["kaiwu"] = kaiwu_module
+        torch_plugin_module = types.ModuleType("kaiwu.torch_plugin")
+        torch_plugin_module.__path__ = [str(root / "kaiwu" / "torch_plugin")]
+        sys.modules["kaiwu.torch_plugin"] = torch_plugin_module
+
+        spec = importlib.util.spec_from_file_location(
+            "kaiwu.torch_plugin.qdiffusion",
+            root / "kaiwu" / "torch_plugin" / "qdiffusion.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["kaiwu.torch_plugin.qdiffusion"] = module
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        for module_name in list(sys.modules):
+            if module_name == "kaiwu" or module_name.startswith("kaiwu."):
+                del sys.modules[module_name]
+        sys.modules.update(previous_modules)
 
 
-class DummySampler:
-    def __init__(self, num_solutions: int = 2) -> None:
-        self.num_solutions = num_solutions
+EnergyModel = import_local_qdiffusion().EnergyModel
 
-    def solve(self, ising_mat):
-        return np.ones((self.num_solutions, ising_mat.shape[0]), dtype=np.float32)
+
+class DummyEnergyModel(EnergyModel):
+    def score_conditioned(
+        self,
+        noisy_tokens: torch.Tensor,
+        candidate_tokens: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        self._last_stats = {
+            "active_ratio": attention_mask.to(torch.float32).mean(),
+        }
+        return (
+            candidate_tokens.to(torch.float32).sum(dim=1, keepdim=True)
+            - noisy_tokens.to(torch.float32).sum(dim=1, keepdim=True)
+        )
 
 
 class TestEnergyModel(unittest.TestCase):
-    def test_score_visible_logits_shape_and_stats(self):
-        model = EnergyModel(
-            bm_num_visible=2,
-            bm_num_hidden=2,
-            sampler=DummySampler(num_solutions=2),
-        )
-        visible_logits = torch.tensor([[2.0, -2.0], [-2.0, 2.0]])
+    def test_forward_delegates_to_score_conditioned(self):
+        model = DummyEnergyModel()
+        noisy_tokens = torch.tensor([[1, 2, 0]])
+        candidate_tokens = torch.tensor([[1, 3, 0]])
+        attention_mask = candidate_tokens.ne(0)
 
-        energy = model.score_visible_logits(visible_logits)
+        energy = model(noisy_tokens, candidate_tokens, attention_mask)
+
+        self.assertEqual(energy.shape, (1, 1))
+        self.assertEqual(float(energy), 1.0)
+
+    def test_base_score_conditioned_requires_subclass(self):
+        model = EnergyModel()
+
+        with self.assertRaises(NotImplementedError):
+            model.score_conditioned(
+                torch.tensor([[1]]),
+                torch.tensor([[1]]),
+                torch.tensor([[True]]),
+            )
+
+    def test_get_last_stats_returns_copy(self):
+        model = DummyEnergyModel()
+        attention_mask = torch.tensor([[True, False]])
+
+        model(
+            torch.tensor([[1, 0]]),
+            torch.tensor([[1, 0]]),
+            attention_mask,
+        )
         stats = model.get_last_stats()
+        stats["active_ratio"] = torch.tensor(0.0)
 
-        self.assertEqual(energy.shape, (2, 1))
-        self.assertIn("sampling_mode", stats)
-        self.assertIn("visible_on_ratio", stats)
-        self.assertIn("hidden_on_ratio", stats)
-        self.assertEqual(float(stats["sampling_mode"]), 1.0)
-
-    def test_score_visible_logits_aggregates_sampler_solutions(self):
-        model = EnergyModel(
-            bm_num_visible=2,
-            bm_num_hidden=2,
-            sampler=DummySampler(num_solutions=3),
-        )
-        visible_logits = torch.tensor([[2.0, -2.0], [-2.0, 2.0]])
-
-        energy = model.score_visible_logits(visible_logits)
-        visible_state = model.discretize_visible_state(visible_logits)
-        full_states, split_sizes = model.sample_hidden_state(visible_state)
-        flat_energy = model.energy_bm(full_states).unsqueeze(-1)
-        expected = torch.stack(
-            [part.mean(dim=0) for part in torch.split(flat_energy, split_sizes.tolist())],
-            dim=0,
-        )
-
-        self.assertTrue(torch.equal(energy, expected))
-
-    def test_discretize_visible_state_returns_sigmoid_probabilities(self):
-        model = EnergyModel(
-            bm_num_visible=3,
-            bm_num_hidden=1,
-            sampler=DummySampler(),
-        )
-
-        visible_logits = torch.tensor([[-2.0, 0.0, 2.0]])
-        visible_state = model.discretize_visible_state(
-            visible_logits
-        )
-
-        self.assertTrue(
-            torch.allclose(visible_state, torch.sigmoid(visible_logits))
-        )
-
-    def test_discretize_visible_state_keeps_sigmoid_gradient(self):
-        model = EnergyModel(
-            bm_num_visible=2,
-            bm_num_hidden=1,
-            sampler=DummySampler(),
-        )
-        visible_logits = torch.tensor([[0.0, 2.0]], requires_grad=True)
-
-        visible_state = model.discretize_visible_state(visible_logits)
-        visible_state.sum().backward()
-
-        self.assertTrue(
-            torch.allclose(visible_state.detach(), torch.sigmoid(visible_logits.detach()))
-        )
-        self.assertIsNotNone(visible_logits.grad)
-        self.assertTrue(torch.all(visible_logits.grad > 0))
+        self.assertTrue(torch.equal(model.get_last_stats()["active_ratio"], torch.tensor(0.5)))
 
 
 if __name__ == "__main__":

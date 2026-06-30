@@ -8,15 +8,15 @@ from __future__ import annotations
 import os
 import random
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 import sys
 from typing import Any
 
-try:
+if __package__ not in {None, "", "trainer"}:
     from .._example_bootstrap import ensure_repo_src_on_path
-except ImportError:  # pragma: no cover - direct script-path compatibility
+else:  # pragma: no cover - direct script-path compatibility
     _WORKFLOW_DIR = Path(__file__).resolve().parent
     _CASE_DIR = _WORKFLOW_DIR.parent
     if str(_CASE_DIR) not in sys.path:
@@ -28,8 +28,9 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 ensure_repo_src_on_path()
 
-try:
-    from ..utils.dplm_builder import build_qdiffusion
+if __package__ not in {None, "", "trainer"}:
+    from ..model.config import Config, DataConfig, ModelConfig, SamplerConfig
+    from ..model import build_qdiffusion
     from ..utils.io import (
         default_fasta_path,
         default_outputs_root,
@@ -43,12 +44,13 @@ try:
         save_quality_summary,
     )
     from ..utils.runtime import (
+        direct_cim_sampler_kwargs_from_env,
         load_trained_energy_weights,
         save_checkpoint,
         seed_torch,
         summarize_trainable_parameters,
     )
-    from .workflow_helpers import (
+    from .model_tuner import (
         build_data_loader_from_records,
         run_epoch,
         run_generation_over_records,
@@ -57,8 +59,9 @@ try:
         split_train_val_test,
         write_markdown_report,
     )
-except ImportError:  # pragma: no cover - direct script-path compatibility
-    from utils.dplm_builder import build_qdiffusion
+else:  # pragma: no cover - direct script-path compatibility
+    from model.config import Config, DataConfig, ModelConfig, SamplerConfig
+    from model import build_qdiffusion
     from utils.io import (
         default_fasta_path,
         default_outputs_root,
@@ -72,12 +75,13 @@ except ImportError:  # pragma: no cover - direct script-path compatibility
         save_quality_summary,
     )
     from utils.runtime import (
+        direct_cim_sampler_kwargs_from_env,
         load_trained_energy_weights,
         save_checkpoint,
         seed_torch,
         summarize_trainable_parameters,
     )
-    from workflow_helpers import (
+    from trainer.model_tuner import (
         build_data_loader_from_records,
         run_epoch,
         run_generation_over_records,
@@ -91,7 +95,7 @@ os.environ.setdefault("BYPROT_EAGER_IMPORTS", "0")
 
 
 def build_generator_from_config(
-    config: "WorkflowConfig",
+    config: Config,
     *,
     device: str,
     num_candidates: int,
@@ -108,7 +112,7 @@ def build_generator_from_config(
     builder with different decode-time overrides. Keeping that mapping in one
     helper makes it easier to see which knobs are shared versus branch-specific.
     """
-    return (
+    generator = (
         build_qdiffusion(
             proposal_ckpt=config.model.proposal_ckpt,
             energy_ckpt=config.model.energy_ckpt,
@@ -120,91 +124,17 @@ def build_generator_from_config(
             resample_ratio=resample_ratio,
             resample_top_p=resample_top_p,
             freeze_proposal=config.model.freeze_proposal,
+            energy_model_type=config.model.energy_model_type,
             **make_bm_build_kwargs(config),
         )
         .eval()
         .to(device)
     )
+    generator.energy_model.freeze_non_energy_parameters()
+    return generator
 
 
-@dataclass
-class DataConfig:
-    """Dataset selection and split settings."""
-
-    fasta_path: str
-    min_length: int = 50
-    max_length: int = 256
-    max_records: int | None = None
-    val_ratio: float = 0.05
-    test_ratio: float = 0.05
-    seed: int = 42
-
-
-@dataclass
-class ModelConfig:
-    """Model checkpoints shared by training and generation."""
-
-    proposal_ckpt: str
-    energy_ckpt: str
-    freeze_proposal: bool = True
-
-
-@dataclass
-class SamplerConfig:
-    """Energy sampler settings.
-
-    Most runs only need ``sampler_type="sa"``. ``sampler_kwargs`` stays empty
-    unless the example is routed through a custom sampler such as CIM.
-    """
-
-    sampler_type: str = "sa"
-    sampler_kwargs: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class TrainConfig:
-    """Training-only knobs."""
-
-    epochs: int = 20
-    min_epochs: int = 3
-    batch_size: int = 4
-    learning_rate: float = 5e-5
-    weight_decay: float = 1e-2
-    grad_clip_norm: float = 1.0
-    num_candidates: int = 4
-    validation_steps: int = 3
-    scheduler_factor: float = 0.5
-    scheduler_patience: int = 1
-    early_stop_patience: int = 4
-    require_cuda: bool = True
-
-
-@dataclass
-class GenerateConfig:
-    """Generation/evaluation knobs used after training."""
-
-    num_candidates: int = 8
-    energy_temperature: float = 1.25
-    proposal_temperature: float = 0.3
-    proposal_noise_scale: float = 1.0
-    disable_resample: bool = False
-    resample_ratio: float = 0.20
-    resample_top_p: float = 0.90
-    steps: int = 5
-
-
-@dataclass
-class WorkflowConfig:
-    """Top-level config grouped by concern instead of one flat field list."""
-
-    data: DataConfig
-    model: ModelConfig
-    sampler: SamplerConfig = field(default_factory=SamplerConfig)
-    train: TrainConfig = field(default_factory=TrainConfig)
-    generate: GenerateConfig = field(default_factory=GenerateConfig)
-
-
-def make_bm_build_kwargs(config: WorkflowConfig) -> dict[str, Any]:
+def make_bm_build_kwargs(config: Config) -> dict[str, Any]:
     """Builds the small BM config payload consumed by the generator builder."""
     return {
         "bm_sampler_type": config.sampler.sampler_type,
@@ -212,35 +142,27 @@ def make_bm_build_kwargs(config: WorkflowConfig) -> dict[str, Any]:
     }
 
 
-def build_default_workflow_config() -> WorkflowConfig:
+def build_default_workflow_config() -> Config:
     """Returns one short, example-friendly default config."""
-    return WorkflowConfig(
+    return Config(
         data=DataConfig(fasta_path=str(default_fasta_path())),
         model=ModelConfig(
             proposal_ckpt="airkingbd/dplm_150m",
             energy_ckpt="airkingbd/dplm_150m",
+            energy_model_type="bm",
         ),
         sampler=SamplerConfig(
-            sampler_type="sa",
+            sampler_type="direct_cim",
+            sampler_kwargs=direct_cim_sampler_kwargs_from_env(),
         ),
     )
 
 
-def main() -> None:
+def run_training_pipeline(config: Config | None = None) -> None:
     """Runs the final self-contained full workflow."""
-    config = build_default_workflow_config()
-    # For custom samplers, keep the top-level structure and only swap this block.
-    #
-    # config.sampler = SamplerConfig(
-    #     sampler_type="cim",
-    #     sampler_kwargs={
-    #         "task_name": "qdiffusion_bm",
-    #         "project_no": "YOUR_PROJECT_ID",
-    #         "task_mode": "OPTIMIZATION",
-    #         "tmp_dir": "./tmp",
-    #         "wait": False,
-    #     },
-    # )
+    config = config or build_default_workflow_config()
+    # The default config uses sampler_type="direct_cim". To switch back to local
+    # simulated annealing for debugging, pass a Config with SamplerConfig("sa").
 
     has_cuda = torch.cuda.is_available()
     if config.train.require_cuda and not has_cuda:
@@ -515,6 +437,23 @@ def main() -> None:
 
     print("Real full workflow completed.")
     print(f"Report: {output_dir / 'REPORT.md'}")
+
+
+class Trainer:
+    """Training orchestrator for DPLM-backed Q-Diffusion experiments."""
+
+    def __init__(self, config: Config | None = None) -> None:
+        """Initializes the trainer with a DPLM workflow config."""
+        self.config = config or build_default_workflow_config()
+
+    def run(self) -> None:
+        """Executes the configured training pipeline."""
+        run_training_pipeline(self.config)
+
+
+def main() -> None:
+    """Runs the default DPLM training pipeline."""
+    Trainer().run()
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ from typing import Iterable
 import torch
 import torch.nn.functional as F
 
-try:
+if __package__ not in {None, "", "downstream"}:
     from ..utils.io import (
         normalize_sequence,
         save_json,
@@ -18,7 +18,7 @@ try:
         write_fasta_records,
     )
     from ..utils.runtime import seed_torch
-except ImportError:  # pragma: no cover - direct script-path compatibility
+else:  # pragma: no cover - direct script-path compatibility
     from utils.io import (
         normalize_sequence,
         save_json,

@@ -9,20 +9,12 @@ from typing import Any
 
 import torch
 
-from kaiwu.torch_plugin import QDiffusion, QDiffusionConfig
+from kaiwu.torch_plugin import QDiffusionConfig
 
-try:
-    from ..models import (
-        BMConditionedEnergyModel,
-        DPLMFeatureEncoder,
-    )
-    from ..models.backbone import DPLMBackbone, build_dplm_token_spec
-except ImportError:  # pragma: no cover - direct script-path compatibility
-    from models import (
-        BMConditionedEnergyModel,
-        DPLMFeatureEncoder,
-    )
-    from models.backbone import DPLMBackbone, build_dplm_token_spec
+from .feature_extractor import DPLMFeatureEncoder
+from .generation import DPLMGenerationConfig, GenerativeQDiffusion
+from .networks import DPLMBackbone, build_dplm_token_spec
+from .bm import BMConditionedEnergyModel
 
 
 def load_dplm_backbone(
@@ -49,6 +41,7 @@ def _build_energy_model(
     bm_sampler: Any | None,
     bm_sampler_type: str,
     bm_sampler_kwargs: dict[str, Any] | None,
+    energy_model_type: str,
 ) -> BMConditionedEnergyModel:
     energy_encoder = DPLMFeatureEncoder(energy_backbone)
     return BMConditionedEnergyModel(
@@ -58,6 +51,7 @@ def _build_energy_model(
         sampler=bm_sampler,
         sampler_type=bm_sampler_type,
         sampler_kwargs=bm_sampler_kwargs,
+        energy_model_type=energy_model_type,
     )
 
 
@@ -70,6 +64,7 @@ def build_qdiffusion(
     bm_sampler: Any | None = None,
     bm_sampler_type: str = "sa",
     bm_sampler_kwargs: dict[str, Any] | None = None,
+    energy_model_type: str = "bm",
     num_candidates: int = 1,
     proposal_temperature: float = 0.0,
     proposal_noise_scale: float = 1.0,
@@ -85,7 +80,7 @@ def build_qdiffusion(
     from_huggingface: bool = True,
     dtype: torch.dtype = torch.float32,
     device: torch.device | str | None = None,
-) -> QDiffusion:
+) -> GenerativeQDiffusion:
     """Builds one generic ``QDiffusion`` instance for the protein example case."""
     proposal_model = load_dplm_backbone(
         proposal_ckpt,
@@ -106,6 +101,7 @@ def build_qdiffusion(
         bm_sampler=bm_sampler,
         bm_sampler_type=bm_sampler_type,
         bm_sampler_kwargs=bm_sampler_kwargs,
+        energy_model_type=energy_model_type,
     )
 
     config = QDiffusionConfig(
@@ -113,23 +109,20 @@ def build_qdiffusion(
         proposal_temperature=proposal_temperature,
         proposal_noise_scale=proposal_noise_scale,
         energy_temperature=energy_temperature,
+    )
+    generation_config = DPLMGenerationConfig(
         disable_resample=disable_resample,
         resample_ratio=resample_ratio,
         resample_top_p=resample_top_p,
     )
-    return QDiffusion(
+    return GenerativeQDiffusion(
         proposal_model=proposal_model,
         energy_model=energy_model,
         token_spec=build_dplm_token_spec(proposal_model),
         config=config,
+        generation_config=generation_config,
         dtype=dtype,
         device=device,
         freeze_proposal=freeze_proposal,
     )
-
-
-def build_dplm_qdiffusion(*args, **kwargs) -> QDiffusion:
-    """Backward-compatible alias for the old builder name."""
-    return build_qdiffusion(*args, **kwargs)
-
 

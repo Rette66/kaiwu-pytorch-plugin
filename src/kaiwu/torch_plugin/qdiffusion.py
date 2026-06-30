@@ -6,22 +6,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 from typing import Any
 
-import numpy as np
 import torch
 from torch import nn
 
-from .full_boltzmann_machine import BoltzmannMachine
 from ._qdiffusion_sampling import (
-    stochastic_sample_from_categorical,
     stochastic_sample_from_categorical_n,
-    top_k_top_p_filtering,
-    topk_masking,
 )
 
-__all__ = ["EnergyModel", "QDiffusion", "QDiffusionConfig"]
+__all__ = ["EnergyModel", "QDiffusion", "QDiffusionConfig", "SequenceTokenSpec"]
 
 
 @dataclass(frozen=True)
@@ -48,21 +42,17 @@ class SequenceTokenSpec:
 
 @dataclass
 class QDiffusionConfig:
-    """Configuration for energy-guided discrete generation.
+    """Configuration for the generic energy-guided training objective.
 
     Attributes:
         num_diffusion_timesteps: Number of discrete noising steps used by the
             training objective.
         use_coupled_sampling: Whether to use the coupled corruption variant.
-        num_candidates: Number of proposal candidates sampled at each decode step.
+        num_candidates: Number of proposal candidates sampled per objective step.
         proposal_temperature: Temperature used for proposal-side sampling.
         proposal_noise_scale: Gumbel noise scale used during proposal sampling.
         energy_temperature: Temperature used when converting energies into
             reranking weights.
-        disable_resample: Whether to disable repetition-collapse resampling.
-        resample_ratio: Frequency threshold that triggers resampling.
-        resample_top_p: Top-p cutoff used during resampling.
-        decoding_strategy: Skeptical-remasking strategy string.
     """
 
     num_diffusion_timesteps: int = 500
@@ -71,31 +61,14 @@ class QDiffusionConfig:
     proposal_temperature: float = 0.0
     proposal_noise_scale: float = 1.0
     energy_temperature: float = 1.0
-    disable_resample: bool = False
-    resample_ratio: float = 0.25
-    resample_top_p: float = 0.95
-    decoding_strategy: str = "reparam-uncond-deterministic-linear"
 
 
 class EnergyModel(nn.Module):
     """Energy-side model interface used by QDiffusion candidate scoring."""
 
-    def __init__(
-        self,
-        bm_num_visible: int | None = None,
-        bm_num_hidden: int | None = None,
-        sampler: Any | None = None,
-    ) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.bm_num_visible = bm_num_visible
-        self.bm_num_hidden = bm_num_hidden
-        self.sampler = sampler
         self._last_stats: dict[str, torch.Tensor] = {}
-        if bm_num_visible is not None and bm_num_hidden is not None:
-            self.energy_bm = BoltzmannMachine(
-                num_visible=bm_num_visible,
-                num_hidden=bm_num_hidden,
-            )
 
     def forward(
         self,
@@ -122,70 +95,9 @@ class EnergyModel(nn.Module):
             "EnergyModel subclasses must implement score_conditioned()."
         )
 
-    def discretize_visible_state(self, visible_logits: torch.Tensor) -> torch.Tensor:
-        """Converts visible logits into normalized BM visible conditions."""
-        return torch.sigmoid(visible_logits)
-
-    def sample_hidden_state(
-        self,
-        visible_state: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Samples BM hidden states for each visible assignment."""
-        if not hasattr(self, "energy_bm") or self.sampler is None:
-            raise RuntimeError(
-                "BM hidden-state sampling requires bm_num_visible, "
-                "bm_num_hidden, and sampler."
-            )
-        batched_states = []
-        split_sizes = []
-        for sample_index in range(visible_state.size(0)):
-            sampled_states = self.energy_bm.condition_sample(
-                self.sampler,
-                visible_state[sample_index : sample_index + 1],
-                dtype=visible_state.dtype,
-            )
-            batched_states.append(sampled_states)
-            split_sizes.append(sampled_states.size(0))
-        return torch.cat(batched_states, dim=0), torch.tensor(
-            split_sizes,
-            device=visible_state.device,
-            dtype=torch.long,
-        )
-
-    def _set_last_stats(
-        self,
-        *,
-        visible_state: torch.Tensor,
-        hidden_state: torch.Tensor,
-    ) -> None:
-        self._last_stats = {
-            "sampling_mode": torch.tensor(
-                1.0,
-                dtype=visible_state.dtype,
-                device=visible_state.device,
-            ),
-            "visible_on_ratio": visible_state.detach().mean(),
-            "hidden_on_ratio": hidden_state.detach().mean(),
-        }
-
     def get_last_stats(self) -> dict[str, torch.Tensor]:
         """Returns lightweight sampler diagnostics from the last score call."""
         return dict(self._last_stats)
-
-    def score_visible_logits(self, visible_logits: torch.Tensor) -> torch.Tensor:
-        """Scores visible logits under the conditioned BM energy model."""
-        if self.bm_num_visible is None:
-            raise RuntimeError("BM visible-logit scoring requires bm_num_visible.")
-        visible_state = self.discretize_visible_state(visible_logits)
-        full_states, split_sizes = self.sample_hidden_state(visible_state)
-        hidden_state = full_states[:, self.bm_num_visible :]
-        self._set_last_stats(
-            visible_state=full_states[:, : self.bm_num_visible],
-            hidden_state=hidden_state,
-        )
-        flat_energy = self.energy_bm(full_states).unsqueeze(-1)
-        split_energy = torch.split(flat_energy, split_sizes.tolist())
-        return torch.stack([energy.mean(dim=0) for energy in split_energy], dim=0)
 
 
 class QDiffusion(nn.Module):
@@ -196,9 +108,8 @@ class QDiffusion(nn.Module):
     - a proposal model that predicts token logits for the current noisy state
     - an energy model that reranks candidate reconstructions
 
-    It exposes both training-oriented APIs such as :meth:`objective` and
-    decoding-oriented APIs such as :meth:`initialize_state`, :meth:`step`, and
-    :meth:`generate`.
+    It exposes training-oriented APIs such as :meth:`objective`. Downstream
+    examples may subclass it to add concrete decoding policies.
     """
 
     def __init__(
@@ -398,122 +309,8 @@ class QDiffusion(nn.Module):
                 outputs[f"{prefix}_{key}"] = value.detach()
         return outputs
 
-    def initialize_state(
-        self,
-        input_tokens: torch.Tensor,
-        partial_masks: torch.Tensor | None = None,
-        max_steps: int = 500,
-        temperature: float = 1.0,
-    ) -> dict[str, Any]:
-        """Creates the initial decoding state for an external generation loop.
-
-        Args:
-            input_tokens: Initial token tensor.
-            partial_masks: Optional boolean mask of fixed positions.
-            max_steps: Planned number of decode iterations.
-            temperature: Sampling temperature stored in the state payload.
-
-        Returns:
-            dict[str, Any]: A mutable state dictionary suitable for repeated :meth:`step` calls.
-        """
-        output_tokens, output_scores = self._initialize_output_tokens(
-            input_tokens, partial_masks=partial_masks
-        )
-        return {
-            "output_tokens": output_tokens,
-            "output_scores": output_scores,
-            "output_masks": self.get_non_special_symbol_mask(
-                output_tokens, partial_masks=partial_masks
-            ),
-            "step": 0,
-            "max_steps": max_steps,
-            "history": [output_tokens.clone()],
-            "temperature": temperature,
-            "partial_masks": partial_masks,
-        }
-
-    def step(
-        self,
-        state: dict[str, Any],
-        partial_masks: torch.Tensor | None = None,
-    ) -> dict[str, Any]:
-        """Runs one denoising/reranking step and returns updated state.
-
-        Args:
-            state: Current decode state created by :meth:`initialize_state`.
-            partial_masks: Optional boolean mask of fixed positions.
-
-        Returns:
-            dict[str, Any]: The updated decode state after one iteration.
-        """
-        partial_masks = (
-            partial_masks if partial_masks is not None else state.get("partial_masks")
-        )
-        step_outputs = self._decode_step(state, partial_masks=partial_masks)
-
-        editable_token_mask = self.get_non_special_symbol_mask(
-            state["output_tokens"], partial_masks=partial_masks
-        )
-        output_masks, result_tokens, result_scores = self._reparam_decoding(
-            output_tokens=state["output_tokens"].clone(),
-            output_scores=state["output_scores"].clone(),
-            step_tokens=step_outputs["output_tokens"].clone(),
-            step_scores=step_outputs["output_scores"].clone(),
-            decoding_strategy=self.config.decoding_strategy,
-            still_noisy_mask=state["output_masks"],
-            editable_token_mask=editable_token_mask,
-            t=state["step"] + 1,
-            max_step=state["max_steps"],
-            noise=self.mask_id,
-        )
-
-        new_state = dict(state)
-        new_state.update(
-            output_tokens=result_tokens,
-            output_scores=result_scores,
-            output_masks=output_masks,
-            step=state["step"] + 1,
-            history=step_outputs["history"],
-            partial_masks=partial_masks,
-        )
-        return new_state
-
-    def generate(
-        self,
-        input_tokens: torch.Tensor,
-        *,
-        max_steps: int = 500,
-        partial_masks: torch.Tensor | None = None,
-        temperature: float = 1.0,
-        return_state: bool = False,
-    ) -> torch.Tensor | dict[str, Any]:
-        """Runs a complete iterative decoding loop inside the core class.
-
-        Args:
-            input_tokens: Initial token tensor.
-            max_steps: Number of decode iterations to run.
-            partial_masks: Optional boolean mask of fixed positions.
-            temperature: Sampling temperature stored in the decode state.
-            return_state: Whether to return the full final state dictionary.
-
-        Returns:
-            torch.Tensor | dict[str, Any]: Either the final token tensor or the full decode state.
-        """
-        state = self.initialize_state(
-            input_tokens=input_tokens,
-            partial_masks=partial_masks,
-            max_steps=max_steps,
-            temperature=temperature,
-        )
-        for _ in range(max_steps):
-            state = self.step(state, partial_masks=partial_masks)
-
-        if return_state:
-            return state
-        return state["output_tokens"]
-
-    # Internal decode and training helpers follow. These stay in the model
-    # class for now, but they are not part of the intended public surface.
+    # Internal objective helpers follow. These stay in the base class because
+    # they define the generic training path, not a downstream decoding policy.
 
     def get_non_special_symbol_mask(
         self, output_tokens: torch.Tensor, partial_masks: torch.Tensor | None = None
@@ -543,26 +340,6 @@ class QDiffusion(nn.Module):
         if not callable(get_last_stats):
             return {}
         return get_last_stats()
-
-    def _initialize_output_tokens(
-        self, input_tokens: torch.Tensor, partial_masks: torch.Tensor | None = None
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Builds the initial fully masked token state for decoding.
-
-        Args:
-            input_tokens: Initial token tensor.
-            partial_masks: Optional boolean mask of fixed positions.
-
-        Returns:
-            tuple[torch.Tensor, torch.Tensor]: A tuple
-            ``(output_tokens, output_scores)`` for the initial decode state.
-        """
-        output_mask = self.get_non_special_symbol_mask(
-            input_tokens, partial_masks=partial_masks
-        )
-        output_tokens = input_tokens.masked_fill(output_mask, self.mask_id)
-        output_scores = torch.zeros_like(output_tokens, dtype=torch.float)
-        return output_tokens, output_scores
 
     def _sample(
         self,
@@ -663,24 +440,6 @@ class QDiffusion(nn.Module):
         }[weighting]
         return weight[:, None].float() / num_timesteps
 
-    def _mask_logits(self, logits: torch.Tensor) -> torch.Tensor:
-        """Suppresses special-token logits before categorical sampling.
-
-        Args:
-            logits: Raw proposal logits.
-
-        Returns:
-            torch.Tensor: A cloned logits tensor with special-token entries masked out.
-        """
-        logits = logits.clone()
-        logits[..., self.mask_id] = -math.inf
-        if self.x_id is not None:
-            logits[..., self.x_id] = -math.inf
-        logits[..., self.pad_id] = -math.inf
-        logits[..., self.bos_id] = -math.inf
-        logits[..., self.eos_id] = -math.inf
-        return logits
-
     def _reshape_candidates(
         self, tensor: torch.Tensor, batch_size: int, num_candidates: int
     ) -> torch.Tensor:
@@ -757,216 +516,3 @@ class QDiffusion(nn.Module):
             flat_noisy_tokens, flat_candidate_tokens, flat_attention_mask
         )
         return energy.view(batch_size, num_candidates)
-
-    def _select_candidates(
-        self,
-        noisy_tokens: torch.Tensor,
-        candidate_tokens: torch.Tensor,
-        candidate_scores: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Selects one candidate per batch element by energy-based reranking.
-
-        Args:
-            noisy_tokens: Current noisy token tensor.
-            candidate_tokens: Candidate reconstructions.
-            candidate_scores: Proposal-side candidate scores.
-
-        Returns:
-            tuple[torch.Tensor, torch.Tensor]: A tuple ``(tokens, scores)``
-            for the selected candidate per sample.
-        """
-        energies = self._score_candidates(noisy_tokens, candidate_tokens)
-        neg_energies = -energies
-        neg_energies = neg_energies - neg_energies.max(dim=-1, keepdim=True)[0]
-        weights = torch.softmax(neg_energies / self.config.energy_temperature, dim=-1)
-        selected_idx = torch.multinomial(weights, 1).squeeze(-1)
-        batch_idx = torch.arange(noisy_tokens.size(0), device=noisy_tokens.device)
-        return (
-            candidate_tokens[batch_idx, selected_idx],
-            candidate_scores[batch_idx, selected_idx],
-        )
-
-    def _resample(self, tokens: torch.Tensor, scores: torch.Tensor) -> None:
-        """Mitigates repetition collapse by masked resampling in place.
-
-        Args:
-            tokens: Candidate token tensor updated in place.
-            scores: Candidate score tensor updated in place.
-        """
-        to_be_resampled = []
-        resample_input = []
-        resample_masks = []
-        resample_scores = []
-
-        for batch_index, sequence in enumerate(tokens):
-            token_positions = {}
-            max_frequency = -1
-            for position, token in enumerate(sequence):
-                token = int(token)
-                token_positions.setdefault(token, []).append(position)
-                max_frequency = max(max_frequency, len(token_positions[token]))
-
-            if max_frequency <= len(sequence) * self.config.resample_ratio:
-                continue
-
-            mask = torch.zeros_like(sequence).bool()
-            for token, positions in token_positions.items():
-                if len(positions) > len(sequence) * self.config.resample_ratio:
-                    mask |= sequence.eq(token)
-
-            to_be_resampled.append(batch_index)
-            resample_scores.append(scores[batch_index])
-            resample_masks.append(mask)
-            resample_input.append(sequence.masked_fill(mask, self.mask_id))
-
-        if not to_be_resampled:
-            return
-
-        resample_input = torch.stack(resample_input, dim=0).type_as(tokens)
-        resample_scores = torch.stack(resample_scores, dim=0).type_as(scores)
-        resample_masks = torch.stack(resample_masks, dim=0).bool()
-        logits = self._mask_logits(self.forward(resample_input))
-        logits = top_k_top_p_filtering(logits, top_p=self.config.resample_top_p)
-        new_tokens, new_scores = stochastic_sample_from_categorical(
-            logits, temperature=0.0
-        )
-        resample_input.masked_scatter_(resample_masks, new_tokens[resample_masks])
-        resample_scores.masked_scatter_(resample_masks, new_scores[resample_masks])
-        tokens[to_be_resampled] = resample_input
-        scores[to_be_resampled] = resample_scores
-
-    def _decode_step(
-        self, state: dict[str, Any], partial_masks: torch.Tensor | None = None
-    ) -> dict[str, Any]:
-        """Runs proposal, reranking, and optional resampling for one step.
-
-        Args:
-            state: Current decode state.
-            partial_masks: Optional boolean mask of fixed positions.
-
-        Returns:
-            dict[str, Any]: Intermediate decode outputs before skeptical remasking.
-        """
-        output_tokens = state["output_tokens"].clone()
-        output_scores = state["output_scores"].clone()
-        output_masks = self.get_non_special_symbol_mask(
-            output_tokens, partial_masks=partial_masks
-        )
-
-        logits = self._mask_logits(self.forward(output_tokens))
-        if logits.dtype != output_scores.dtype:
-            logits = logits.type_as(output_scores)
-
-        candidate_tokens, candidate_scores = self._sample_candidates(
-            logits, self.config.num_candidates
-        )
-        selected_tokens, selected_scores = self._select_candidates(
-            output_tokens, candidate_tokens, candidate_scores
-        )
-
-        if not self.config.disable_resample:
-            self._resample(selected_tokens, selected_scores)
-
-        output_tokens.masked_scatter_(output_masks, selected_tokens[output_masks])
-        output_scores.masked_scatter_(output_masks, selected_scores[output_masks])
-
-        history = list(state["history"])
-        history.append(output_tokens.clone())
-        return {
-            "output_tokens": output_tokens,
-            "output_scores": output_scores,
-            "history": history,
-        }
-
-    def _reparam_decoding(
-        self,
-        output_tokens: torch.Tensor,
-        output_scores: torch.Tensor,
-        step_tokens: torch.Tensor,
-        step_scores: torch.Tensor,
-        decoding_strategy: str,
-        still_noisy_mask: torch.Tensor,
-        editable_token_mask: torch.Tensor,
-        t: int,
-        max_step: int,
-        noise: int | float | torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Applies skeptical remasking to produce the next decode state.
-
-        Args:
-            output_tokens: Previous-step output tokens.
-            output_scores: Previous-step token scores.
-            step_tokens: Current-step candidate tokens.
-            step_scores: Current-step candidate scores.
-            decoding_strategy: Skeptical-remasking strategy string.
-            still_noisy_mask: Boolean mask tracking which positions remain noisy.
-            editable_token_mask: Editable non-special-token mask.
-            t: Current decode step index, starting from ``1``.
-            max_step: Total decode step count.
-            noise: Mask token id or per-position noise tensor.
-
-        Returns:
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor]: A tuple
-            ``(new_mask, new_tokens, new_scores)`` describing the next decode
-            state.
-        """
-        _, condition, topk_mode, schedule = decoding_strategy.split("-")
-
-        if schedule == "linear":
-            rate = 1 - t / max_step
-        elif schedule == "cosine":
-            rate = np.cos(t / max_step * np.pi * 0.5)
-        else:
-            raise NotImplementedError(f"Unknown schedule: {schedule}")
-
-        cutoff_len = (
-            editable_token_mask.sum(1, keepdim=True).type_as(output_scores) * rate
-        ).long()
-        scores_for_topk = step_scores.masked_fill(~editable_token_mask, 1000.0)
-
-        if topk_mode.startswith("stochastic"):
-            noise_scale = float(topk_mode.replace("stochastic", ""))
-            lowest_k_mask = topk_masking(
-                scores_for_topk,
-                cutoff_len,
-                stochastic=True,
-                temp=noise_scale * rate,
-            )
-        elif topk_mode == "deterministic":
-            lowest_k_mask = topk_masking(scores_for_topk, cutoff_len, stochastic=False)
-        else:
-            raise NotImplementedError(f"Unknown topk mode: {topk_mode}")
-
-        if condition == "cond":
-            keep_masked_from_previous = (
-                (step_tokens == output_tokens)
-                & (step_scores < output_scores)
-                & lowest_k_mask
-            )
-        elif condition == "uncond":
-            keep_masked_from_previous = lowest_k_mask
-        else:
-            raise NotImplementedError(f"Unknown condition mode: {condition}")
-
-        keep_masked_this_step = lowest_k_mask
-        masked_to_noise = (~still_noisy_mask & keep_masked_from_previous) | (
-            still_noisy_mask & keep_masked_this_step
-        )
-        if isinstance(noise, torch.Tensor):
-            output_tokens.masked_scatter_(masked_to_noise, noise[masked_to_noise])
-        else:
-            output_tokens.masked_fill_(masked_to_noise, noise)
-        output_scores.masked_fill_(masked_to_noise, -math.inf)
-
-        masked_to_candidate_tokens = still_noisy_mask & ~keep_masked_this_step
-        output_tokens.masked_scatter_(
-            masked_to_candidate_tokens, step_tokens[masked_to_candidate_tokens]
-        )
-        output_scores.masked_scatter_(
-            masked_to_candidate_tokens, step_scores[masked_to_candidate_tokens]
-        )
-
-        new_still_noisy_mask = (
-            still_noisy_mask | keep_masked_from_previous
-        ) & keep_masked_this_step
-        return new_still_noisy_mask, output_tokens, output_scores

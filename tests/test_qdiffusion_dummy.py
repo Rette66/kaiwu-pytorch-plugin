@@ -1,20 +1,54 @@
 """Offline unit tests for generic QDiffusion construction."""
 
-import os
+import importlib.util
+from pathlib import Path
 import sys
+import types
 import unittest
 
 import torch
 from torch import nn
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
-from kaiwu.torch_plugin.qdiffusion import (
-    EnergyModel,
-    QDiffusion,
-    QDiffusionConfig,
-    SequenceTokenSpec,
-)
+def import_local_qdiffusion():
+    """Loads the current checkout instead of an installed kaiwu package."""
+    root = Path(__file__).resolve().parents[1] / "src"
+    previous_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "kaiwu" or name.startswith("kaiwu.")
+    }
+    for module_name in list(sys.modules):
+        if module_name == "kaiwu" or module_name.startswith("kaiwu."):
+            del sys.modules[module_name]
+    try:
+        kaiwu_module = types.ModuleType("kaiwu")
+        kaiwu_module.__path__ = [str(root / "kaiwu")]
+        sys.modules["kaiwu"] = kaiwu_module
+        torch_plugin_module = types.ModuleType("kaiwu.torch_plugin")
+        torch_plugin_module.__path__ = [str(root / "kaiwu" / "torch_plugin")]
+        sys.modules["kaiwu.torch_plugin"] = torch_plugin_module
+
+        spec = importlib.util.spec_from_file_location(
+            "kaiwu.torch_plugin.qdiffusion",
+            root / "kaiwu" / "torch_plugin" / "qdiffusion.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["kaiwu.torch_plugin.qdiffusion"] = module
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        for module_name in list(sys.modules):
+            if module_name == "kaiwu" or module_name.startswith("kaiwu."):
+                del sys.modules[module_name]
+        sys.modules.update(previous_modules)
+
+
+_qdiffusion = import_local_qdiffusion()
+EnergyModel = _qdiffusion.EnergyModel
+QDiffusion = _qdiffusion.QDiffusion
+QDiffusionConfig = _qdiffusion.QDiffusionConfig
+SequenceTokenSpec = _qdiffusion.SequenceTokenSpec
 
 
 class DummyTokenizer:
@@ -82,7 +116,6 @@ class TestQDiffusionDummy(unittest.TestCase):
             num_diffusion_timesteps=8,
             num_candidates=2,
             proposal_temperature=0.0,
-            disable_resample=True,
         )
         self.model = QDiffusion(
             proposal_model=self.proposal_model,
@@ -147,9 +180,10 @@ class TestQDiffusionDummy(unittest.TestCase):
         self.assertEqual(outputs["weight"].shape, (2, 1))
         self.assertEqual(outputs["energy_objective"].shape, (2, 1))
 
-    def test_generate_one_step(self):
-        generated = self.model.generate(self.targets, max_steps=1)
-        self.assertEqual(generated.shape, self.targets.shape)
+    def test_base_class_does_not_own_generation_policy(self):
+        self.assertFalse(hasattr(self.model, "generate"))
+        self.assertFalse(hasattr(self.model, "step"))
+        self.assertFalse(hasattr(self.model, "initialize_state"))
 
     def test_removed_dplm_entrypoints(self):
         self.assertFalse(hasattr(QDiffusion, "from_pretrained"))

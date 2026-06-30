@@ -6,6 +6,18 @@ import importlib
 from typing import Any
 
 
+def _load_object(dotted_path: str) -> Any:
+    """Loads one object from a ``module.attr`` dotted path."""
+    module_name, _, attr_name = dotted_path.rpartition(".")
+    if not module_name or not attr_name:
+        raise ValueError(
+            "Direct CIM optimizer path must be a dotted path like "
+            "'package.module.OptimizerClass'."
+        )
+    module = importlib.import_module(module_name)
+    return getattr(module, attr_name)
+
+
 def build_bm_sampler(
     *,
     sampler_type: str,
@@ -13,6 +25,7 @@ def build_bm_sampler(
 ) -> Any:
     """Builds one sampler object for BM hidden-state sampling."""
     sampler_kwargs = dict(sampler_kwargs or {})
+    sampler_type = sampler_type.replace("-", "_")
     if sampler_type == "sa":
         from kaiwu.classical import SimulatedAnnealingOptimizer
 
@@ -90,5 +103,28 @@ def build_bm_sampler(
             ),
         }
         return precision_reducer(sampler, **precision_kwargs)
+
+    if sampler_type == "direct_cim":
+        optimizer_path = sampler_kwargs.pop(
+            "optimizer_path",
+            sampler_kwargs.pop("direct_optimizer_path", None),
+        )
+        if not optimizer_path:
+            raise ValueError(
+                "sampler_type='direct_cim' requires sampler_kwargs['optimizer_path'] "
+                "pointing to the direct hardware optimizer/factory."
+            )
+
+        optimizer_factory = _load_object(optimizer_path)
+        optimizer_kwargs = dict(sampler_kwargs.pop("optimizer_kwargs", {}))
+        for key, value in sampler_kwargs.items():
+            if value is not None:
+                optimizer_kwargs.setdefault(key, value)
+        sampler = optimizer_factory(**optimizer_kwargs)
+        if not hasattr(sampler, "solve"):
+            raise TypeError(
+                "Direct CIM optimizer must return an object with solve(ising_matrix)."
+            )
+        return sampler
 
     raise ValueError(f"Unsupported BM sampler_type for DPLM examples: {sampler_type}")

@@ -16,13 +16,13 @@ Edit the config block inside ``main()`` before running:
 from __future__ import annotations
 
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 import sys
 
-try:
+if __package__ not in {None, "", "downstream"}:
     from .._example_bootstrap import ensure_repo_src_on_path
-except ImportError:  # pragma: no cover - direct script-path compatibility
+else:  # pragma: no cover - direct script-path compatibility
     _WORKFLOW_DIR = Path(__file__).resolve().parent
     _CASE_DIR = _WORKFLOW_DIR.parent
     if str(_CASE_DIR) not in sys.path:
@@ -32,8 +32,9 @@ import torch
 
 ensure_repo_src_on_path()
 
-try:
-    from ..utils.dplm_builder import build_qdiffusion
+if __package__ not in {None, "", "downstream"}:
+    from ..model.config import EvalConfig, GenerationConfig
+    from ..model import build_qdiffusion
     from ..utils.io import (
         default_fasta_path,
         default_outputs_root,
@@ -41,7 +42,10 @@ try:
         read_fasta_records,
         save_json,
     )
-    from ..utils.runtime import load_trained_energy_weights
+    from ..utils.runtime import (
+        direct_cim_sampler_kwargs_from_env,
+        load_trained_energy_weights,
+    )
     from .esm2_eval_helpers import (
         DistanceSummary,
         embed_sequences,
@@ -53,8 +57,9 @@ try:
         write_rows_csv,
         write_summary_json,
     )
-except ImportError:  # pragma: no cover - direct script-path compatibility
-    from utils.dplm_builder import build_qdiffusion
+else:  # pragma: no cover - direct script-path compatibility
+    from model.config import EvalConfig, GenerationConfig
+    from model import build_qdiffusion
     from utils.io import (
         default_fasta_path,
         default_outputs_root,
@@ -62,8 +67,11 @@ except ImportError:  # pragma: no cover - direct script-path compatibility
         read_fasta_records,
         save_json,
     )
-    from utils.runtime import load_trained_energy_weights
-    from esm2_eval_helpers import (
+    from utils.runtime import (
+        direct_cim_sampler_kwargs_from_env,
+        load_trained_energy_weights,
+    )
+    from downstream.esm2_eval_helpers import (
         DistanceSummary,
         embed_sequences,
         evaluate_candidate_set,
@@ -76,56 +84,6 @@ except ImportError:  # pragma: no cover - direct script-path compatibility
     )
 
 os.environ.setdefault("BYPROT_EAGER_IMPORTS", "0")
-
-
-@dataclass
-class GenerationConfig:
-    """Generation settings used when this script also produces FASTA files."""
-
-    proposal_ckpt: str
-    energy_ckpt: str
-    guided_checkpoint: str | None
-    generation_steps: int
-    seed: int
-    freeze_proposal: bool
-    guided_num_candidates: int
-    guided_proposal_temperature: float
-    guided_proposal_noise_scale: float
-    guided_energy_temperature: float
-    guided_disable_resample: bool
-    guided_resample_ratio: float
-    guided_resample_top_p: float
-    bm_sampler_type: str
-    bm_sampler_kwargs: dict[str, object] | None
-
-
-@dataclass
-class EvalConfig:
-    """Top-level config edited directly in ``main()`` for local/server runs."""
-
-    reference_fasta: Path
-    proposal_ckpt: str
-    energy_ckpt: str
-    guided_checkpoint: str
-    output_dir: Path
-    device: str
-    esm2_model: str
-    pair_mode: str
-    pooling: str
-    batch_size: int
-    max_records: int | None
-    generation_steps: int
-    seed: int
-    freeze_proposal: bool
-    guided_num_candidates: int
-    guided_proposal_temperature: float
-    guided_proposal_noise_scale: float
-    guided_energy_temperature: float
-    guided_disable_resample: bool
-    guided_resample_ratio: float
-    guided_resample_top_p: float
-    bm_sampler_type: str
-    bm_sampler_kwargs: dict[str, object] | None
 
 
 def build_bm_kwargs(config: EvalConfig) -> dict[str, object]:
@@ -161,6 +119,7 @@ def build_generator_for_eval(
             resample_ratio=resample_ratio,
             resample_top_p=resample_top_p,
             freeze_proposal=config.freeze_proposal,
+            energy_model_type=config.energy_model_type,
             **build_bm_kwargs(config),
         )
         .eval()
@@ -184,6 +143,7 @@ def build_sa_eval_config(
     generation_steps: int = 500,
     seed: int = 42,
     freeze_proposal: bool = True,
+    energy_model_type: str = "bm",
     guided_num_candidates: int = 4,
     guided_proposal_temperature: float = 0.3,
     guided_proposal_noise_scale: float = 1.0,
@@ -245,6 +205,7 @@ def build_sa_eval_config(
         guided_resample_top_p=guided_resample_top_p,
         bm_sampler_type="sa",
         bm_sampler_kwargs=None,
+        energy_model_type=energy_model_type,
     )
 
 
@@ -276,6 +237,7 @@ def build_cim_eval_config(
     generation_steps: int = 500,
     seed: int = 42,
     freeze_proposal: bool = True,
+    energy_model_type: str = "bm",
     guided_num_candidates: int = 4,
     guided_proposal_temperature: float = 0.3,
     guided_proposal_noise_scale: float = 1.0,
@@ -364,6 +326,67 @@ def build_cim_eval_config(
             "only_feasible_solution": only_feasible_solution,
             "tmp_dir": tmp_dir,
         },
+        energy_model_type=energy_model_type,
+    )
+
+
+def build_direct_cim_eval_config(
+    *,
+    reference_fasta: Path,
+    proposal_ckpt: str,
+    energy_ckpt: str,
+    guided_checkpoint: str,
+    output_dir: Path,
+    device: str,
+    optimizer_path: str,
+    optimizer_kwargs: dict[str, object] | None = None,
+    esm2_model: str = "esm2_t33_650M_UR50D",
+    pair_mode: str = "order",
+    pooling: str = "mean",
+    batch_size: int = 1,
+    max_records: int | None = 20,
+    generation_steps: int = 500,
+    seed: int = 42,
+    freeze_proposal: bool = True,
+    guided_num_candidates: int = 4,
+    guided_proposal_temperature: float = 0.3,
+    guided_proposal_noise_scale: float = 1.0,
+    guided_energy_temperature: float = 1.25,
+    guided_disable_resample: bool = False,
+    guided_resample_ratio: float = 0.20,
+    guided_resample_top_p: float = 0.90,
+    energy_model_type: str = "bm",
+) -> EvalConfig:
+    """Builds one direct-hardware CIM downstream evaluation config."""
+    return EvalConfig(
+        reference_fasta=reference_fasta,
+        proposal_ckpt=proposal_ckpt,
+        energy_ckpt=energy_ckpt,
+        guided_checkpoint=guided_checkpoint,
+        output_dir=output_dir,
+        device=device,
+        esm2_model=esm2_model,
+        pair_mode=pair_mode,
+        pooling=pooling,
+        batch_size=batch_size,
+        max_records=max_records,
+        generation_steps=generation_steps,
+        seed=seed,
+        freeze_proposal=freeze_proposal,
+        guided_num_candidates=guided_num_candidates,
+        guided_proposal_temperature=guided_proposal_temperature,
+        guided_proposal_noise_scale=guided_proposal_noise_scale,
+        guided_energy_temperature=guided_energy_temperature,
+        guided_disable_resample=guided_disable_resample,
+        guided_resample_ratio=guided_resample_ratio,
+        guided_resample_top_p=guided_resample_top_p,
+        bm_sampler_type="direct_cim",
+        bm_sampler_kwargs={
+            "optimizer_path": optimizer_path,
+            "optimizer_kwargs": dict(optimizer_kwargs or {}),
+        },
+        energy_model_type=energy_model_type,
+        direct_optimizer_path=optimizer_path,
     )
 
 
@@ -415,6 +438,7 @@ def generate_candidate_fastas(
         guided_resample_top_p=config.guided_resample_top_p,
         bm_sampler_type=config.bm_sampler_type,
         bm_sampler_kwargs=config.bm_sampler_kwargs,
+        energy_model_type=config.energy_model_type,
     )
     save_json(generation_dir / "generation_config.json", asdict(generation_cfg))
     print(f"Saved generation config to: {generation_dir / 'generation_config.json'}")
@@ -473,48 +497,8 @@ def generate_candidate_fastas(
 # 3. embed reference and generated sequences with ESM2
 # 4. compute distances and write reports
 # ---------------------------------------------------------------------------
-def main() -> None:
-    """Runs one local/server generation+evaluation pass with in-file config."""
-    config = build_sa_eval_config(
-        reference_fasta=default_fasta_path(),
-        proposal_ckpt="/data2/wwx/models/dplm_150m",
-        energy_ckpt="/data2/wwx/models/dplm_150m",
-        guided_checkpoint="ckpt/best_epoch_9.pt",
-        output_dir=default_outputs_root() / "esm2_distance_eval",
-        device="cuda:0" if torch.cuda.is_available() else "cpu",
-        esm2_model="esm2_t33_650M_UR50D",
-        pair_mode="order",
-        pooling="mean",
-        batch_size=1,
-        max_records=20,
-        generation_steps=500,
-        seed=42,
-        freeze_proposal=True,
-        guided_num_candidates=4,
-        guided_proposal_temperature=0.3,
-        guided_proposal_noise_scale=1.0,
-        guided_energy_temperature=1.25,
-        guided_disable_resample=False,
-        guided_resample_ratio=0.20,
-        guided_resample_top_p=0.90,
-    )
-    # Switch to the CIM template when you want generation/evaluation to use the
-    # same remote CIM sampling path as training.
-    #
-    # config = build_cim_eval_config(
-    #     reference_fasta=default_fasta_path(),
-    #     proposal_ckpt="/data2/wwx/models/dplm_150m",
-    #     energy_ckpt="/data2/wwx/models/dplm_150m",
-    #     guided_checkpoint="ckpt/best_epoch_9.pt",
-    #     output_dir=default_outputs_root() / "esm2_distance_eval",
-    #     device="cuda:0" if torch.cuda.is_available() else "cpu",
-    #     task_name="qdiffusion_bm",
-    #     project_no="YOUR_PROJECT_ID",
-    #     task_mode="OPTIMIZATION",
-    #     tmp_dir="./tmp",
-    #     wait=False,
-    # )
-
+def run_eval(config: EvalConfig) -> None:
+    """Runs one generation+ESM2 evaluation pass from a prepared config."""
     device = torch.device(config.device)
     output_dir: Path = config.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -614,6 +598,46 @@ def main() -> None:
             f"mean_cosine_distance={summary.mean_cosine_distance:.6f} "
             f"mean_l2_distance={summary.mean_l2_distance:.6f}"
         )
+
+
+def get_full_pipeline(config: EvalConfig):
+    """Returns a callable downstream evaluation pipeline for ``config``."""
+
+    def pipeline() -> None:
+        run_eval(config)
+
+    return pipeline
+
+
+def main() -> None:
+    """Runs one local/server generation+evaluation pass with direct CIM."""
+    direct_cim_kwargs = direct_cim_sampler_kwargs_from_env()
+    config = build_direct_cim_eval_config(
+        reference_fasta=default_fasta_path(),
+        proposal_ckpt="/data2/wwx/models/dplm_150m",
+        energy_ckpt="/data2/wwx/models/dplm_150m",
+        guided_checkpoint="ckpt/best_epoch_9.pt",
+        output_dir=default_outputs_root() / "esm2_distance_eval_direct_cim",
+        device="cuda:0" if torch.cuda.is_available() else "cpu",
+        optimizer_path=direct_cim_kwargs["optimizer_path"],
+        optimizer_kwargs=direct_cim_kwargs.get("optimizer_kwargs"),
+        esm2_model="esm2_t33_650M_UR50D",
+        pair_mode="order",
+        pooling="mean",
+        batch_size=1,
+        max_records=20,
+        generation_steps=500,
+        seed=42,
+        freeze_proposal=True,
+        guided_num_candidates=4,
+        guided_proposal_temperature=0.3,
+        guided_proposal_noise_scale=1.0,
+        guided_energy_temperature=1.25,
+        guided_disable_resample=False,
+        guided_resample_ratio=0.20,
+        guided_resample_top_p=0.90,
+    )
+    run_eval(config)
 
 
 if __name__ == "__main__":

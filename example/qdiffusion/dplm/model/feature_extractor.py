@@ -7,7 +7,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from .backbone import DPLMBackbone
+from .networks import DPLMBackbone
 
 
 class DPLMFeatureEncoder(nn.Module):

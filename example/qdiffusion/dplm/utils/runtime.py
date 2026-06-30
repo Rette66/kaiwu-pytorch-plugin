@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,40 @@ def seed_torch(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def direct_cim_sampler_kwargs_from_env(*, required: bool = True) -> dict[str, Any]:
+    """Builds direct-CIM sampler kwargs from server environment variables.
+
+    Expected variables:
+        DPLM_DIRECT_CIM_OPTIMIZER_PATH: Optional dotted path to the direct
+            hardware optimizer/factory. Defaults to the bundled lightweight
+            adapter ``model.direct_cim_adapter.DirectCIMOptimizer``.
+        DPLM_DIRECT_CIM_OPTIMIZER_KWARGS: Optional JSON object forwarded to
+            that optimizer/factory.
+    """
+    optimizer_path = os.getenv(
+        "DPLM_DIRECT_CIM_OPTIMIZER_PATH",
+        "model.direct_cim_adapter.DirectCIMOptimizer",
+    ).strip()
+    if not optimizer_path:
+        if required:
+            raise RuntimeError(
+                "Set DPLM_DIRECT_CIM_OPTIMIZER_PATH to the dotted path of the "
+                "direct-CIM optimizer before running this workflow."
+            )
+        return {}
+
+    sampler_kwargs: dict[str, Any] = {"optimizer_path": optimizer_path}
+    raw_optimizer_kwargs = os.getenv("DPLM_DIRECT_CIM_OPTIMIZER_KWARGS", "").strip()
+    if raw_optimizer_kwargs:
+        optimizer_kwargs = json.loads(raw_optimizer_kwargs)
+        if not isinstance(optimizer_kwargs, dict):
+            raise ValueError(
+                "DPLM_DIRECT_CIM_OPTIMIZER_KWARGS must be a JSON object."
+            )
+        sampler_kwargs["optimizer_kwargs"] = optimizer_kwargs
+    return sampler_kwargs
 
 
 def encode_sequence(
@@ -51,6 +87,7 @@ def _energy_backend_state(generator) -> dict[str, Any]:
 def _energy_backend_metadata(generator) -> dict[str, Any]:
     """Collects lightweight metadata required to rebuild the BM backend."""
     return {
+        "energy_model_type": getattr(generator.energy_model, "energy_model_type", None),
         "bm_sampler_type": getattr(generator.energy_model, "sampler_type", None),
         "bm_sampler_kwargs": getattr(generator.energy_model, "sampler_kwargs", {}),
     }
