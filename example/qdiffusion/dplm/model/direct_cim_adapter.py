@@ -36,7 +36,7 @@ class DirectCIMOptimizer:
         user_id: str | None = None,
         sdk_code: str | None = None,
         project_no: str | None = None,
-        init_license: bool = True,
+        init_license: bool = False,
         **optimizer_kwargs: Any,
     ) -> None:
         import kaiwu as kw
@@ -85,6 +85,8 @@ class DirectCIMOptimizer:
 
     def _create_worker(self):
         self.kw.common.CheckpointManager.save_dir = self.tmp_dir
+        # The direct-hardware path follows the standalone direct_cim.py script:
+        # credentials are passed to CIMOptimizer, not pre-validated via license.
         self._init_license_if_available()
         kwargs = {
             "task_name": self.task_name,
