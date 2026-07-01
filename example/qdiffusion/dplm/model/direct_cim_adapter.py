@@ -35,6 +35,8 @@ class DirectCIMOptimizer:
         tmp_dir: str = "./tmp",
         refresh_hours: float = 20.0,
         refresh_task_name: bool = False,
+        adjust_precision: bool = True,
+        precision_bit_width: int = 14,
         user_id: str | None = None,
         sdk_code: str | None = None,
         project_no: str | None = None,
@@ -71,6 +73,8 @@ class DirectCIMOptimizer:
         self.tmp_dir = tmp_dir
         self.refresh_seconds = refresh_hours * 3600
         self.refresh_task_name = refresh_task_name
+        self.adjust_precision = adjust_precision
+        self.precision_bit_width = precision_bit_width
         self.optimizer_kwargs = dict(optimizer_kwargs)
         self.worker = None
         self.worker_created_ts: float | None = None
@@ -117,10 +121,26 @@ class DirectCIMOptimizer:
             f"project_no={kwargs.get('project_no')} "
             f"task_mode={kwargs.get('task_mode')} sample_number={kwargs.get('sample_number')} "
             f"wait={kwargs.get('wait')} interval={kwargs.get('interval')} "
-            f"pass_credentials={self.pass_credentials} keys={logged_keys}",
+            f"pass_credentials={self.pass_credentials} "
+            f"adjust_precision={self.adjust_precision} "
+            f"precision_bit_width={self.precision_bit_width} keys={logged_keys}",
             flush=True,
         )
         return self.cim.CIMOptimizer(**kwargs)
+
+    def _prepare_ising_matrix(self, ising_matrix):
+        """Applies the same precision adjustment used by direct_cim.py."""
+        matrix = np.asarray(ising_matrix, dtype=np.float32)
+        if not self.adjust_precision:
+            return matrix
+        preprocess = getattr(self.kw, "preprocess", None)
+        adjust = getattr(preprocess, "adjust_ising_matrix_precision", None)
+        if not callable(adjust):
+            raise RuntimeError(
+                "adjust_precision=True but kaiwu.preprocess."
+                "adjust_ising_matrix_precision is unavailable."
+            )
+        return adjust(matrix, bit_width=self.precision_bit_width)
 
     def _refresh_worker(self, *, force: bool = False, reason: str = "scheduled") -> None:
         now_ts = time.monotonic()
@@ -151,6 +171,7 @@ class DirectCIMOptimizer:
 
     def solve(self, ising_matrix):
         """Solves one Ising matrix on direct CIM and returns solver samples."""
+        ising_matrix = self._prepare_ising_matrix(ising_matrix)
         output = None
         while output is None:
             self._refresh_worker()
