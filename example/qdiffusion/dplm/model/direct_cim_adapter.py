@@ -34,6 +34,7 @@ class DirectCIMOptimizer:
         sample_number: int = 10,
         tmp_dir: str = "./tmp",
         refresh_hours: float = 20.0,
+        refresh_task_name: bool = False,
         user_id: str | None = None,
         sdk_code: str | None = None,
         project_no: str | None = None,
@@ -69,6 +70,7 @@ class DirectCIMOptimizer:
         self.sample_number = sample_number
         self.tmp_dir = tmp_dir
         self.refresh_seconds = refresh_hours * 3600
+        self.refresh_task_name = refresh_task_name
         self.optimizer_kwargs = dict(optimizer_kwargs)
         self.worker = None
         self.worker_created_ts: float | None = None
@@ -100,19 +102,22 @@ class DirectCIMOptimizer:
         if self.pass_credentials:
             kwargs["user_id"] = self.user_id
             kwargs["sdk_code"] = self.sdk_code
-        kwargs.update(
-            {
-                key: value
-                for key, value in self.optimizer_kwargs.items()
-                if value is not None
-            }
-        )
+        extra_kwargs = {
+            key: value
+            for key, value in self.optimizer_kwargs.items()
+            if value is not None
+        }
+        if not self.pass_credentials:
+            extra_kwargs.pop("user_id", None)
+            extra_kwargs.pop("sdk_code", None)
+        kwargs.update(extra_kwargs)
+        logged_keys = sorted(key for key in kwargs if key != "sdk_code")
         print(
             "[DIRECT_CIM_CONFIG] "
             f"project_no={kwargs.get('project_no')} "
             f"task_mode={kwargs.get('task_mode')} sample_number={kwargs.get('sample_number')} "
             f"wait={kwargs.get('wait')} interval={kwargs.get('interval')} "
-            f"pass_credentials={self.pass_credentials}",
+            f"pass_credentials={self.pass_credentials} keys={logged_keys}",
             flush=True,
         )
         return self.cim.CIMOptimizer(**kwargs)
@@ -150,7 +155,7 @@ class DirectCIMOptimizer:
         while output is None:
             self._refresh_worker()
             try:
-                if hasattr(self.worker, "task_name"):
+                if self.refresh_task_name and hasattr(self.worker, "task_name"):
                     self.worker.task_name = f"{self.task_name}_{int(time.time())}"
                 output = self.worker.solve(ising_matrix)
             except Exception as exc:
