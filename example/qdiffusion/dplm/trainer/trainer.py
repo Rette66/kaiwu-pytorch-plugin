@@ -46,6 +46,7 @@ if __package__ not in {None, "", "trainer"}:
     from ..utils.runtime import (
         direct_cim_sampler_kwargs_from_env,
         load_trained_energy_weights,
+        redact_sensitive_config,
         save_checkpoint,
         seed_torch,
         summarize_trainable_parameters,
@@ -77,6 +78,7 @@ else:  # pragma: no cover - direct script-path compatibility
     from utils.runtime import (
         direct_cim_sampler_kwargs_from_env,
         load_trained_energy_weights,
+        redact_sensitive_config,
         save_checkpoint,
         seed_torch,
         summarize_trainable_parameters,
@@ -198,7 +200,7 @@ def run_training_pipeline(config: Config | None = None) -> None:
 
     save_json(
         output_dir / "run_config.json",
-        {
+        redact_sensitive_config({
             **asdict(config),
             "device": device,
             "all_records": len(all_records),
@@ -206,7 +208,7 @@ def run_training_pipeline(config: Config | None = None) -> None:
             "train_records": len(train_records),
             "val_records": len(val_records),
             "test_records": len(test_records),
-        },
+        }),
     )
 
     splits_dir = output_dir / "data_splits"

@@ -26,6 +26,9 @@ def direct_cim_sampler_kwargs_from_env(*, required: bool = True) -> dict[str, An
             adapter ``model.direct_cim_adapter.DirectCIMOptimizer``.
         DPLM_DIRECT_CIM_OPTIMIZER_KWARGS: Optional JSON object forwarded to
             that optimizer/factory.
+        DPLM_DIRECT_CIM_USER_ID/SDK_CODE/PROJECT_NO: Optional direct-CIM
+            account/project credentials. USER_ID/SDK_CODE/PROJECT_NO are also
+            accepted as short aliases.
     """
     optimizer_path = os.getenv(
         "DPLM_DIRECT_CIM_OPTIMIZER_PATH",
@@ -47,8 +50,36 @@ def direct_cim_sampler_kwargs_from_env(*, required: bool = True) -> dict[str, An
             raise ValueError(
                 "DPLM_DIRECT_CIM_OPTIMIZER_KWARGS must be a JSON object."
             )
+    else:
+        optimizer_kwargs = {}
+
+    env_credentials = {
+        "user_id": os.getenv("DPLM_DIRECT_CIM_USER_ID") or os.getenv("USER_ID"),
+        "sdk_code": os.getenv("DPLM_DIRECT_CIM_SDK_CODE") or os.getenv("SDK_CODE"),
+        "project_no": os.getenv("DPLM_DIRECT_CIM_PROJECT_NO") or os.getenv("PROJECT_NO"),
+    }
+    for key, value in env_credentials.items():
+        if value and key not in optimizer_kwargs:
+            optimizer_kwargs[key] = value
+    if optimizer_kwargs:
         sampler_kwargs["optimizer_kwargs"] = optimizer_kwargs
     return sampler_kwargs
+
+
+def redact_sensitive_config(payload: Any) -> Any:
+    """Returns a copy of ``payload`` with credential-like fields masked."""
+    sensitive_keys = {"sdk_code", "password", "token", "secret", "api_key"}
+    if isinstance(payload, dict):
+        redacted = {}
+        for key, value in payload.items():
+            if key.lower() in sensitive_keys:
+                redacted[key] = "***"
+            else:
+                redacted[key] = redact_sensitive_config(value)
+        return redacted
+    if isinstance(payload, list):
+        return [redact_sensitive_config(item) for item in payload]
+    return payload
 
 
 def encode_sequence(

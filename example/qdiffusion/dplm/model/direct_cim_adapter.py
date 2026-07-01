@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import datetime
+import os
 import time
 from typing import Any
 
 import numpy as np
+
+
+DEFAULT_USER_ID = "1"
+DEFAULT_SDK_CODE = "4wZ9izfcBw4Iyb17vHQHWSIVFJrtZM"
+DEFAULT_PROJECT_NO = "26060963"
 
 
 class DirectCIMOptimizer:
@@ -27,11 +33,34 @@ class DirectCIMOptimizer:
         sample_number: int = 10,
         tmp_dir: str = "./tmp",
         refresh_hours: float = 20.0,
+        user_id: str | None = None,
+        sdk_code: str | None = None,
+        project_no: str | None = None,
+        init_license: bool = True,
         **optimizer_kwargs: Any,
     ) -> None:
         import kaiwu as kw
 
         self.kw = kw
+        self.user_id = (
+            user_id
+            or os.getenv("DPLM_DIRECT_CIM_USER_ID")
+            or os.getenv("USER_ID")
+            or DEFAULT_USER_ID
+        )
+        self.sdk_code = (
+            sdk_code
+            or os.getenv("DPLM_DIRECT_CIM_SDK_CODE")
+            or os.getenv("SDK_CODE")
+            or DEFAULT_SDK_CODE
+        )
+        self.project_no = (
+            project_no
+            or os.getenv("DPLM_DIRECT_CIM_PROJECT_NO")
+            or os.getenv("PROJECT_NO")
+            or DEFAULT_PROJECT_NO
+        )
+        self.init_license = init_license
         self.task_name = task_name
         self.wait = wait
         self.interval = interval
@@ -45,14 +74,27 @@ class DirectCIMOptimizer:
         self.worker_created_at: datetime.datetime | None = None
         self._refresh_worker(force=True, reason="init")
 
+    def _init_license_if_available(self) -> None:
+        """Initializes Kaiwu license when the runtime exposes that helper."""
+        if not self.init_license or not self.user_id or not self.sdk_code:
+            return
+        license_module = getattr(self.kw, "license", None)
+        init = getattr(license_module, "init", None)
+        if callable(init):
+            init(self.user_id, self.sdk_code)
+
     def _create_worker(self):
         self.kw.common.CheckpointManager.save_dir = self.tmp_dir
+        self._init_license_if_available()
         kwargs = {
             "task_name": self.task_name,
             "wait": self.wait,
             "interval": self.interval,
             "task_mode": self.task_mode,
             "sample_number": self.sample_number,
+            "user_id": self.user_id,
+            "sdk_code": self.sdk_code,
+            "project_no": self.project_no,
         }
         kwargs.update(
             {

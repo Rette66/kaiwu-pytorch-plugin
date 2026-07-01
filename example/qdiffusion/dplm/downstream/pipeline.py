@@ -45,6 +45,7 @@ if __package__ not in {None, "", "downstream"}:
     from ..utils.runtime import (
         direct_cim_sampler_kwargs_from_env,
         load_trained_energy_weights,
+        redact_sensitive_config,
     )
     from .esm2_eval_helpers import (
         DistanceSummary,
@@ -70,6 +71,7 @@ else:  # pragma: no cover - direct script-path compatibility
     from utils.runtime import (
         direct_cim_sampler_kwargs_from_env,
         load_trained_energy_weights,
+        redact_sensitive_config,
     )
     from downstream.esm2_eval_helpers import (
         DistanceSummary,
@@ -440,7 +442,10 @@ def generate_candidate_fastas(
         bm_sampler_kwargs=config.bm_sampler_kwargs,
         energy_model_type=config.energy_model_type,
     )
-    save_json(generation_dir / "generation_config.json", asdict(generation_cfg))
+    save_json(
+        generation_dir / "generation_config.json",
+        redact_sensitive_config(asdict(generation_cfg)),
+    )
     print(f"Saved generation config to: {generation_dir / 'generation_config.json'}")
 
     baseline_path = generation_dir / "baseline_generated_sequences.fasta"
