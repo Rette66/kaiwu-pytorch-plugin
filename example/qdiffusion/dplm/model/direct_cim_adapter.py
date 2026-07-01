@@ -45,19 +45,16 @@ class DirectCIMOptimizer:
         self.user_id = (
             user_id
             or os.getenv("DPLM_DIRECT_CIM_USER_ID")
-            or os.getenv("USER_ID")
             or DEFAULT_USER_ID
         )
         self.sdk_code = (
             sdk_code
             or os.getenv("DPLM_DIRECT_CIM_SDK_CODE")
-            or os.getenv("SDK_CODE")
             or DEFAULT_SDK_CODE
         )
         self.project_no = (
             project_no
             or os.getenv("DPLM_DIRECT_CIM_PROJECT_NO")
-            or os.getenv("PROJECT_NO")
             or DEFAULT_PROJECT_NO
         )
         self.init_license = init_license
@@ -104,6 +101,13 @@ class DirectCIMOptimizer:
                 for key, value in self.optimizer_kwargs.items()
                 if value is not None
             }
+        )
+        print(
+            "[DIRECT_CIM_CONFIG] "
+            f"user_id={kwargs.get('user_id')} project_no={kwargs.get('project_no')} "
+            f"task_mode={kwargs.get('task_mode')} sample_number={kwargs.get('sample_number')} "
+            f"wait={kwargs.get('wait')} interval={kwargs.get('interval')}",
+            flush=True,
         )
         return self.kw.cim.CIMOptimizer(**kwargs)
 

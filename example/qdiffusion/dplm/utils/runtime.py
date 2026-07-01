@@ -27,8 +27,7 @@ def direct_cim_sampler_kwargs_from_env(*, required: bool = True) -> dict[str, An
         DPLM_DIRECT_CIM_OPTIMIZER_KWARGS: Optional JSON object forwarded to
             that optimizer/factory.
         DPLM_DIRECT_CIM_USER_ID/SDK_CODE/PROJECT_NO: Optional direct-CIM
-            account/project credentials. USER_ID/SDK_CODE/PROJECT_NO are also
-            accepted as short aliases.
+            account/project credentials.
     """
     optimizer_path = os.getenv(
         "DPLM_DIRECT_CIM_OPTIMIZER_PATH",
@@ -54,9 +53,9 @@ def direct_cim_sampler_kwargs_from_env(*, required: bool = True) -> dict[str, An
         optimizer_kwargs = {}
 
     env_credentials = {
-        "user_id": os.getenv("DPLM_DIRECT_CIM_USER_ID") or os.getenv("USER_ID"),
-        "sdk_code": os.getenv("DPLM_DIRECT_CIM_SDK_CODE") or os.getenv("SDK_CODE"),
-        "project_no": os.getenv("DPLM_DIRECT_CIM_PROJECT_NO") or os.getenv("PROJECT_NO"),
+        "user_id": os.getenv("DPLM_DIRECT_CIM_USER_ID"),
+        "sdk_code": os.getenv("DPLM_DIRECT_CIM_SDK_CODE"),
+        "project_no": os.getenv("DPLM_DIRECT_CIM_PROJECT_NO"),
     }
     for key, value in env_credentials.items():
         if value and key not in optimizer_kwargs:
