@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import importlib
 import os
 import time
 from typing import Any
@@ -10,9 +11,9 @@ from typing import Any
 import numpy as np
 
 
-DEFAULT_USER_ID = "1"
-DEFAULT_SDK_CODE = "4wZ9izfcBw4Iyb17vHQHWSIVFJrtZM"
-DEFAULT_PROJECT_NO = "26060963"
+DEFAULT_USER_ID = "157297654894690562"
+DEFAULT_SDK_CODE = "vbaJxXUrdv0Kiqlc6ytoza9fyiZhk6"
+DEFAULT_PROJECT_NO = "26078472"
 
 
 class DirectCIMOptimizer:
@@ -37,11 +38,13 @@ class DirectCIMOptimizer:
         sdk_code: str | None = None,
         project_no: str | None = None,
         init_license: bool = False,
+        pass_credentials: bool = False,
         **optimizer_kwargs: Any,
     ) -> None:
         import kaiwu as kw
 
         self.kw = kw
+        self.cim = importlib.import_module("kaiwu.cim")
         self.user_id = (
             user_id
             or os.getenv("DPLM_DIRECT_CIM_USER_ID")
@@ -58,6 +61,7 @@ class DirectCIMOptimizer:
             or DEFAULT_PROJECT_NO
         )
         self.init_license = init_license
+        self.pass_credentials = pass_credentials
         self.task_name = task_name
         self.wait = wait
         self.interval = interval
@@ -91,10 +95,11 @@ class DirectCIMOptimizer:
             "interval": self.interval,
             "task_mode": self.task_mode,
             "sample_number": self.sample_number,
-            "user_id": self.user_id,
-            "sdk_code": self.sdk_code,
             "project_no": self.project_no,
         }
+        if self.pass_credentials:
+            kwargs["user_id"] = self.user_id
+            kwargs["sdk_code"] = self.sdk_code
         kwargs.update(
             {
                 key: value
@@ -104,12 +109,13 @@ class DirectCIMOptimizer:
         )
         print(
             "[DIRECT_CIM_CONFIG] "
-            f"user_id={kwargs.get('user_id')} project_no={kwargs.get('project_no')} "
+            f"project_no={kwargs.get('project_no')} "
             f"task_mode={kwargs.get('task_mode')} sample_number={kwargs.get('sample_number')} "
-            f"wait={kwargs.get('wait')} interval={kwargs.get('interval')}",
+            f"wait={kwargs.get('wait')} interval={kwargs.get('interval')} "
+            f"pass_credentials={self.pass_credentials}",
             flush=True,
         )
-        return self.kw.cim.CIMOptimizer(**kwargs)
+        return self.cim.CIMOptimizer(**kwargs)
 
     def _refresh_worker(self, *, force: bool = False, reason: str = "scheduled") -> None:
         now_ts = time.monotonic()
