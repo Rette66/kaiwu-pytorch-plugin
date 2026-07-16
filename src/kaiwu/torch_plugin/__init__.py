@@ -3,7 +3,12 @@
 
 from .dbn import UnsupervisedDBN
 from .full_boltzmann_machine import BoltzmannMachine
-from .qdiffusion import EnergyModel, QDiffusion, QDiffusionConfig
+from .qdiffusion import (
+    EnergyModel,
+    QDiffusion,
+    QDiffusionConfig,
+    SequenceTokenSpec,
+)
 from .qvae import QVAE
 from .restricted_boltzmann_machine import RestrictedBoltzmannMachine
 from .usage_stats import (
@@ -22,6 +27,7 @@ __all__ = [
     "UnsupervisedDBN",
     "QDiffusion",
     "QDiffusionConfig",
+    "SequenceTokenSpec",
     "enable_usage_stats",
     "disable_usage_stats",
     "is_usage_stats_enabled",

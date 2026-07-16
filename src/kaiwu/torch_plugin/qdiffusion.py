@@ -21,7 +21,12 @@ from ._qdiffusion_sampling import (
     topk_masking,
 )
 
-__all__ = ["EnergyModel", "QDiffusion", "QDiffusionConfig"]
+__all__ = [
+    "EnergyModel",
+    "QDiffusion",
+    "QDiffusionConfig",
+    "SequenceTokenSpec",
+]
 
 
 @dataclass(frozen=True)
@@ -66,6 +71,12 @@ class QDiffusionConfig:
         energy_temperature: Temperature used when converting energies into
             reranking weights.
 
+        use_energy: Whether candidate selection uses the energy model. When
+            disabled, candidates are ranked only by their proposal scores.
+
+        suppress_eos: Whether EOS is removed from proposal logits. Fixed-length
+            sequence tasks usually enable this; NLP generation can disable it.
+
         disable_resample: Whether to disable repetition-collapse resampling.
 
         resample_ratio: Frequency threshold that triggers resampling.
@@ -81,6 +92,8 @@ class QDiffusionConfig:
     proposal_temperature: float = 0.0
     proposal_noise_scale: float = 1.0
     energy_temperature: float = 1.0
+    use_energy: bool = True
+    suppress_eos: bool = True
     disable_resample: bool = False
     resample_ratio: float = 0.25
     resample_top_p: float = 0.95
@@ -227,7 +240,7 @@ class QDiffusion(nn.Module):
     def __init__(
         self,
         proposal_model: nn.Module,
-        energy_model: EnergyModel,
+        energy_model: EnergyModel | None,
         token_spec: SequenceTokenSpec,
         config: QDiffusionConfig | None = None,
         dtype: torch.dtype = torch.float32,
@@ -257,6 +270,9 @@ class QDiffusion(nn.Module):
         self.eos_id = token_spec.eos_id
         self.x_id = token_spec.x_id
         self.softplus = nn.Softplus()
+
+        if self.config.use_energy and self.energy_model is None:
+            raise ValueError("energy_model is required when config.use_energy=True.")
 
         if device is None:
             try:
@@ -334,6 +350,8 @@ class QDiffusion(nn.Module):
         Returns:
             torch.Tensor: A tensor of scalar energies with shape ``[batch, 1]``.
         """
+        if self.energy_model is None:
+            raise RuntimeError("Energy scoring is disabled for this QDiffusion model.")
         if attention_mask is None:
             attention_mask = candidate_tokens.ne(self.pad_id)
 
@@ -357,6 +375,15 @@ class QDiffusion(nn.Module):
             supervision masks, loss weights, and the EBM objective term.
         """
         target = batch["targets"]
+        maskable_mask = batch.get("maskable_mask")
+        if maskable_mask is None:
+            maskable_mask = self.get_non_special_symbol_mask(target)
+        elif maskable_mask.shape != target.shape:
+            raise ValueError(
+                "batch['maskable_mask'] must have the same shape as batch['targets']."
+            )
+        else:
+            maskable_mask = maskable_mask.to(device=target.device, dtype=torch.bool)
         first_timestep, second_timestep = torch.randint(
             1,
             self.config.num_diffusion_timesteps + 1,
@@ -369,14 +396,14 @@ class QDiffusion(nn.Module):
                 target,
                 first_timestep,
                 second_timestep,
-                self.get_non_special_symbol_mask(target),
+                maskable_mask,
             )
             target = target.repeat(2, 1)
         else:
             sample_outputs = self._sample(
                 target,
                 first_timestep,
-                self.get_non_special_symbol_mask(target),
+                maskable_mask,
             )
 
         noisy_tokens = sample_outputs["x_t"]
@@ -694,9 +721,12 @@ class QDiffusion(nn.Module):
         logits[..., self.mask_id] = -math.inf
         if self.x_id is not None:
             logits[..., self.x_id] = -math.inf
-        logits[..., self.pad_id] = -math.inf
-        logits[..., self.bos_id] = -math.inf
-        logits[..., self.eos_id] = -math.inf
+        if self.pad_id != self.eos_id or self.config.suppress_eos:
+            logits[..., self.pad_id] = -math.inf
+        if self.bos_id != self.eos_id or self.config.suppress_eos:
+            logits[..., self.bos_id] = -math.inf
+        if self.config.suppress_eos:
+            logits[..., self.eos_id] = -math.inf
         return logits
 
     def _reshape_candidates(
@@ -793,11 +823,17 @@ class QDiffusion(nn.Module):
             tuple[torch.Tensor, torch.Tensor]: A tuple ``(tokens, scores)``
             for the selected candidate per sample.
         """
-        energies = self._score_candidates(noisy_tokens, candidate_tokens)
-        neg_energies = -energies
-        neg_energies = neg_energies - neg_energies.max(dim=-1, keepdim=True)[0]
-        weights = torch.softmax(neg_energies / self.config.energy_temperature, dim=-1)
-        selected_idx = torch.multinomial(weights, 1).squeeze(-1)
+        if self.config.use_energy:
+            energies = self._score_candidates(noisy_tokens, candidate_tokens)
+            neg_energies = -energies
+            neg_energies = neg_energies - neg_energies.max(dim=-1, keepdim=True)[0]
+            weights = torch.softmax(
+                neg_energies / self.config.energy_temperature, dim=-1
+            )
+            selected_idx = torch.multinomial(weights, 1).squeeze(-1)
+        else:
+            proposal_sequence_scores = candidate_scores.sum(dim=-1)
+            selected_idx = proposal_sequence_scores.argmax(dim=-1)
         batch_idx = torch.arange(noisy_tokens.size(0), device=noisy_tokens.device)
         return (
             candidate_tokens[batch_idx, selected_idx],
@@ -878,6 +914,14 @@ class QDiffusion(nn.Module):
         candidate_tokens, candidate_scores = self._sample_candidates(
             logits, self.config.num_candidates
         )
+        if partial_masks is not None:
+            fixed_mask = partial_masks[:, None, :].to(
+                device=candidate_tokens.device, dtype=torch.bool
+            )
+            fixed_tokens = output_tokens[:, None, :].expand_as(candidate_tokens)
+            fixed_scores = output_scores[:, None, :].expand_as(candidate_scores)
+            candidate_tokens = torch.where(fixed_mask, fixed_tokens, candidate_tokens)
+            candidate_scores = torch.where(fixed_mask, fixed_scores, candidate_scores)
         selected_tokens, selected_scores = self._select_candidates(
             output_tokens, candidate_tokens, candidate_scores
         )
