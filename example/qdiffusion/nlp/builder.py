@@ -15,6 +15,7 @@ def build_mdlm_qdiffusion(
     backbone: MDLMBackbone,
     *,
     use_energy: bool,
+    energy_backbone: MDLMBackbone | None = None,
     bm_num_visible: int = 64,
     bm_num_hidden: int = 32,
     bm_sampler: Any | None = None,
@@ -47,7 +48,7 @@ def build_mdlm_qdiffusion(
     energy_model = None
     if use_energy:
         energy_model = MDLMConditionedEnergyModel(
-            encoder=backbone,
+            encoder=energy_backbone or backbone,
             bm_num_visible=bm_num_visible,
             bm_num_hidden=bm_num_hidden,
             sampler=bm_sampler,

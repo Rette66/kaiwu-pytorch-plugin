@@ -51,6 +51,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bm-num-visible", type=int, default=64)
     parser.add_argument("--bm-num-hidden", type=int, default=32)
     parser.add_argument(
+        "--energy-unfreeze-last-layers",
+        type=int,
+        default=0,
+        help="Number of final energy-MDLM transformer blocks to train.",
+    )
+    parser.add_argument(
         "--bm-scoring-mode",
         choices=("sampler", "exact"),
         default="sampler",
@@ -308,6 +314,7 @@ def validate_trainable_parameters(generator) -> list[torch.nn.Parameter]:
         "energy_model.feature_projector.",
         "energy_model.visible_transform.",
         "energy_model.energy_bm.",
+        "energy_model.encoder.model.backbone.blocks.",
     )
     named_parameters = [
         (name, parameter)
@@ -365,9 +372,22 @@ def main() -> None:
         .to(device)
         .eval()
     )
+    energy_backbone = (
+        MDLMBackbone.from_pretrained(
+            args.checkpoint,
+            tokenizer_name_or_path=args.tokenizer,
+            torch_dtype=torch.float32,
+        )
+        .to(device)
+        .eval()
+    )
+    trainable_energy_names = energy_backbone.train_last_blocks(
+        args.energy_unfreeze_last_layers
+    )
     generator = build_mdlm_qdiffusion(
         backbone,
         use_energy=True,
+        energy_backbone=energy_backbone,
         bm_num_visible=args.bm_num_visible,
         bm_num_hidden=args.bm_num_hidden,
         bm_scoring_mode=args.bm_scoring_mode,
@@ -460,6 +480,12 @@ def main() -> None:
                     "mdlm_checkpoint": args.checkpoint,
                     "tokenizer": args.tokenizer,
                     "max_length": args.max_length,
+                    "energy_unfreeze_last_layers": (
+                        args.energy_unfreeze_last_layers
+                    ),
+                    "trainable_energy_parameters": len(
+                        trainable_energy_names
+                    ),
                     "objective": args.objective,
                     "ranking_teacher": (
                         args.ranking_teacher

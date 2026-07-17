@@ -31,6 +31,11 @@ def save_energy_checkpoint(
         "visible_transform": energy_model.visible_transform.mode,
     }
     metadata.update(extra_metadata or {})
+    trainable_encoder_state = {
+        name: parameter.detach().cpu()
+        for name, parameter in energy_model.encoder.named_parameters()
+        if parameter.requires_grad
+    }
     torch.save(
         {
             "epoch": epoch,
@@ -40,6 +45,7 @@ def save_energy_checkpoint(
                 "feature_projector": energy_model.feature_projector.state_dict(),
                 "visible_transform": energy_model.visible_transform.state_dict(),
                 "energy_bm": energy_model.energy_bm.state_dict(),
+                "energy_encoder_trainable": trainable_encoder_state,
             },
         },
         path,
@@ -72,3 +78,8 @@ def load_energy_weights(generator, checkpoint: dict[str, Any]) -> None:
             state_dict["visible_transform"]
         )
     energy_model.energy_bm.load_state_dict(state_dict["energy_bm"])
+    if state_dict.get("energy_encoder_trainable"):
+        energy_model.encoder.load_state_dict(
+            state_dict["energy_encoder_trainable"],
+            strict=False,
+        )

@@ -464,9 +464,9 @@ class QDiffusion(nn.Module):
         negative_energy = candidate_energies.mean(dim=1, keepdim=True)
         negative_stats = self._collect_energy_model_stats()
 
-        energy_objective = (
-            self.softplus(positive_energy)
-            + self.softplus(-negative_energy)
+        energy_objective = self._binary_energy_objective(
+            positive_energy,
+            candidate_energies,
         )
         weight = self._compute_loss_weight(timesteps, weighting)
         outputs = {
@@ -487,6 +487,20 @@ class QDiffusion(nn.Module):
             for key, value in stats.items():
                 outputs[f"{prefix}_{key}"] = value.detach()
         return outputs
+
+    def _binary_energy_objective(
+        self,
+        positive_energy: torch.Tensor,
+        candidate_energies: torch.Tensor,
+    ) -> torch.Tensor:
+        """Applies binary NCE independently to every proposal negative."""
+
+        return self.softplus(positive_energy) + self.softplus(
+            -candidate_energies
+        ).mean(
+            dim=1,
+            keepdim=True,
+        )
 
     def initialize_state(
         self,

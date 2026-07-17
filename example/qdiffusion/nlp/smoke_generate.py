@@ -181,10 +181,28 @@ def main() -> None:
     )
     use_energy = energy_checkpoint is not None
     metadata = energy_checkpoint["metadata"] if energy_checkpoint else {}
+    energy_unfreeze_last_layers = int(
+        metadata.get("energy_unfreeze_last_layers", 0)
+    )
+    energy_backbone = None
+    if use_energy and energy_unfreeze_last_layers:
+        energy_backbone = (
+            MDLMBackbone.from_pretrained(
+                args.checkpoint,
+                tokenizer_name_or_path=args.tokenizer,
+                torch_dtype=torch.float32,
+            )
+            .to(device)
+            .eval()
+        )
+        energy_backbone.train_last_blocks(
+            energy_unfreeze_last_layers
+        )
     num_candidates = args.num_candidates or (8 if use_energy else 1)
     generator = build_mdlm_qdiffusion(
         backbone,
         use_energy=use_energy,
+        energy_backbone=energy_backbone,
         bm_num_visible=int(metadata.get("bm_num_visible", 64)),
         bm_num_hidden=int(metadata.get("bm_num_hidden", 32)),
         bm_visible_transform=metadata.get("visible_transform", "sigmoid"),
@@ -206,6 +224,8 @@ def main() -> None:
     )
     if energy_checkpoint is not None:
         load_energy_weights(generator, energy_checkpoint)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
     prompts = load_prompts(args.prompt, args.prompts_file)
     records = []
     for prompt_index, prompt in enumerate(prompts):

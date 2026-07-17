@@ -142,6 +142,34 @@ class MDLMBackbone(nn.Module):
             raise RuntimeError("MDLM checkpoint did not return hidden states.")
         return hidden_states[-1]
 
+    def train_last_blocks(self, num_blocks: int) -> list[str]:
+        """Freezes the backbone except for its final transformer blocks."""
+
+        blocks = getattr(
+            getattr(self.model, "backbone", None),
+            "blocks",
+            None,
+        )
+        if blocks is None:
+            raise AttributeError(
+                "MDLM model does not expose model.backbone.blocks."
+            )
+        if num_blocks < 0 or num_blocks > len(blocks):
+            raise ValueError(
+                f"num_blocks must be between 0 and {len(blocks)}."
+            )
+        for parameter in self.parameters():
+            parameter.requires_grad = False
+        if num_blocks:
+            for block in blocks[-num_blocks:]:
+                for parameter in block.parameters():
+                    parameter.requires_grad = True
+        return [
+            name
+            for name, parameter in self.named_parameters()
+            if parameter.requires_grad
+        ]
+
 
 def build_mdlm_token_spec(backbone: MDLMBackbone) -> SequenceTokenSpec:
     """Builds generic QDiffusion token metadata for an MDLM backbone."""

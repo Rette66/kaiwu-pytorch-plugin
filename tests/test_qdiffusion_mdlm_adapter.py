@@ -72,6 +72,15 @@ class CountingFakeMDLM(FakeMDLM):
         return super().forward(**kwargs)
 
 
+class LayeredFakeMDLM(FakeMDLM):
+    def __init__(self) -> None:
+        super().__init__()
+        self.backbone = nn.Module()
+        self.backbone.blocks = nn.ModuleList(
+            [nn.Linear(1, 1) for _ in range(3)]
+        )
+
+
 class FakeTokenizer:
     pad_token_id = 0
     bos_token_id = 1
@@ -154,6 +163,27 @@ def test_mdlm_adapter_exposes_hidden_states_and_token_spec():
 def test_mdlm_adapter_rejects_time_conditioned_checkpoint():
     with pytest.raises(ValueError, match="time_conditioning=False"):
         MDLMBackbone(FakeMDLM(time_conditioning=True), FakeTokenizer(), mask_id=5)
+
+
+def test_mdlm_energy_backbone_only_unfreezes_requested_final_blocks():
+    backbone = MDLMBackbone(
+        LayeredFakeMDLM(),
+        FakeTokenizer(),
+        mask_id=5,
+    )
+
+    trainable_names = backbone.train_last_blocks(2)
+
+    assert trainable_names
+    assert all(
+        name.startswith("model.backbone.blocks.1.")
+        or name.startswith("model.backbone.blocks.2.")
+        for name in trainable_names
+    )
+    assert not any(
+        parameter.requires_grad
+        for parameter in backbone.model.backbone.blocks[0].parameters()
+    )
 
 
 def test_mdlm_conditioned_bm_is_the_qdiffusion_energy_path():

@@ -147,6 +147,27 @@ class TestQDiffusionDummy(unittest.TestCase):
         self.assertEqual(outputs["weight"].shape, (2, 1))
         self.assertEqual(outputs["energy_objective"].shape, (2, 1))
 
+    def test_binary_energy_objective_scores_each_negative_before_averaging(self):
+        positive = torch.tensor([[0.25]])
+        negatives = torch.tensor([[-3.0, 3.0]])
+
+        objective = self.model._binary_energy_objective(
+            positive,
+            negatives,
+        )
+        expected = torch.nn.functional.softplus(positive) + (
+            torch.nn.functional.softplus(-negatives).mean(
+                dim=1,
+                keepdim=True,
+            )
+        )
+        mean_first = torch.nn.functional.softplus(positive) + (
+            torch.nn.functional.softplus(-negatives.mean(dim=1, keepdim=True))
+        )
+
+        self.assertTrue(torch.allclose(objective, expected))
+        self.assertFalse(torch.allclose(objective, mean_first))
+
     def test_generate_one_step(self):
         generated = self.model.generate(self.targets, max_steps=1)
         self.assertEqual(generated.shape, self.targets.shape)
