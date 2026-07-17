@@ -55,6 +55,25 @@ def parse_args() -> argparse.Namespace:
         choices=("sampler", "exact"),
         default="sampler",
     )
+    parser.add_argument(
+        "--bm-visible-transform",
+        choices=("sigmoid", "identity", "layernorm"),
+        default="sigmoid",
+    )
+    parser.add_argument(
+        "--objective",
+        choices=("binary", "ranking"),
+        default="binary",
+    )
+    parser.add_argument("--ranking-teacher", default="gpt2")
+    parser.add_argument(
+        "--ranking-loss",
+        choices=("listwise", "pairwise"),
+        default="listwise",
+    )
+    parser.add_argument("--teacher-temperature", type=float, default=1.0)
+    parser.add_argument("--ranking-energy-temperature", type=float, default=1.0)
+    parser.add_argument("--binary-loss-weight", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
@@ -95,6 +114,13 @@ def run_epoch(
     generator,
     loader: DataLoader,
     optimizer: AdamW | None,
+    *,
+    objective: str,
+    teacher_model=None,
+    ranking_loss: str = "listwise",
+    teacher_temperature: float = 1.0,
+    ranking_energy_temperature: float = 1.0,
+    binary_loss_weight: float = 0.1,
 ) -> dict[str, float]:
     """Runs one epoch and returns example-weighted energy metrics."""
 
@@ -105,11 +131,91 @@ def run_epoch(
     total_examples = 0
     positive_energy_total = 0.0
     negative_energy_total = 0.0
+    ranking_correct = 0
+    ranking_regret_total = 0.0
+    ranking_spread_total = 0.0
+    pairwise_correct = 0
+    pairwise_total = 0
     context = torch.enable_grad if training else torch.no_grad
     with context():
         for batch in loader:
             outputs = generator.objective(batch)
-            loss = (outputs["energy_objective"] * outputs["weight"]).mean()
+            binary_loss = (
+                outputs["energy_objective"] * outputs["weight"]
+            ).mean()
+            if objective == "ranking":
+                if teacher_model is None:
+                    raise RuntimeError(
+                        "Ranking objective requires a teacher model."
+                    )
+                teacher_nll = candidate_teacher_nll(
+                    outputs["candidate_tokens"],
+                    teacher_model,
+                    eos_token_id=generator.eos_id,
+                )
+                candidate_energies = outputs["candidate_energies"]
+                if ranking_loss == "listwise":
+                    teacher_probabilities = torch.softmax(
+                        -teacher_nll / teacher_temperature,
+                        dim=-1,
+                    )
+                    student_log_probabilities = torch.log_softmax(
+                        -candidate_energies
+                        / ranking_energy_temperature,
+                        dim=-1,
+                    )
+                    ranking_objective = -(
+                        teacher_probabilities
+                        * student_log_probabilities
+                    ).sum(dim=-1).mean()
+                else:
+                    teacher_difference = (
+                        teacher_nll.unsqueeze(-1)
+                        - teacher_nll.unsqueeze(-2)
+                    )
+                    energy_difference = (
+                        candidate_energies.unsqueeze(-1)
+                        - candidate_energies.unsqueeze(-2)
+                    )
+                    better_pair = teacher_difference.lt(0)
+                    pair_losses = torch.nn.functional.softplus(
+                        energy_difference[better_pair]
+                        / ranking_energy_temperature
+                    )
+                    if pair_losses.numel():
+                        ranking_objective = pair_losses.mean()
+                    else:
+                        ranking_objective = candidate_energies.sum() * 0.0
+                    ordered_correct = energy_difference[better_pair].lt(0)
+                    pairwise_correct += int(ordered_correct.sum().item())
+                    pairwise_total += int(ordered_correct.numel())
+                loss = (
+                    ranking_objective
+                    + binary_loss_weight * binary_loss
+                )
+                teacher_best = teacher_nll.argmin(dim=-1)
+                energy_best = candidate_energies.argmin(dim=-1)
+                ranking_correct += int(
+                    teacher_best.eq(energy_best).sum().item()
+                )
+                selected_nll = teacher_nll.gather(
+                    dim=-1,
+                    index=energy_best.unsqueeze(-1),
+                ).squeeze(-1)
+                ranking_regret_total += float(
+                    (
+                        selected_nll
+                        - teacher_nll.min(dim=-1).values
+                    ).sum()
+                )
+                ranking_spread_total += float(
+                    (
+                        teacher_nll.max(dim=-1).values
+                        - teacher_nll.min(dim=-1).values
+                    ).sum()
+                )
+            else:
+                loss = binary_loss
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -130,12 +236,69 @@ def run_epoch(
     denominator = max(total_examples, 1)
     positive_energy = positive_energy_total / denominator
     negative_energy = negative_energy_total / denominator
-    return {
+    metrics = {
         "energy_objective": total_loss / denominator,
         "positive_energy": positive_energy,
         "negative_energy": negative_energy,
         "energy_margin": negative_energy - positive_energy,
     }
+    if objective == "ranking":
+        metrics.update(
+            ranking_top1_accuracy=ranking_correct / denominator,
+            ranking_teacher_regret=ranking_regret_total / denominator,
+            ranking_teacher_nll_spread=(
+                ranking_spread_total / denominator
+            ),
+            ranking_pair_count=pairwise_total,
+            ranking_pairwise_accuracy=(
+                pairwise_correct / pairwise_total
+                if pairwise_total
+                else 0.0
+            ),
+        )
+    return metrics
+
+
+@torch.no_grad()
+def candidate_teacher_nll(
+    candidate_tokens: torch.Tensor,
+    teacher_model,
+    *,
+    eos_token_id: int,
+) -> torch.Tensor:
+    """Returns mean causal-LM NLL for every candidate sequence."""
+
+    batch_size, num_candidates, seq_len = candidate_tokens.shape
+    flat_tokens = candidate_tokens.reshape(
+        batch_size * num_candidates,
+        seq_len,
+    )
+    non_eos = flat_tokens.ne(eos_token_id)
+    attention_mask = torch.cat(
+        [
+            torch.ones_like(non_eos[:, :1]),
+            non_eos[:, :-1].cumprod(dim=-1),
+        ],
+        dim=-1,
+    ).bool()
+    teacher_outputs = teacher_model(
+        input_ids=flat_tokens,
+        attention_mask=attention_mask,
+        return_dict=True,
+    )
+    shifted_logits = teacher_outputs.logits[:, :-1].float()
+    shifted_targets = flat_tokens[:, 1:]
+    valid_tokens = attention_mask[:, 1:]
+    token_nll = (
+        -torch.log_softmax(shifted_logits, dim=-1)
+        .gather(-1, shifted_targets.unsqueeze(-1))
+        .squeeze(-1)
+    )
+    sequence_nll = (
+        token_nll.masked_fill(~valid_tokens, 0.0).sum(dim=-1)
+        / valid_tokens.sum(dim=-1).clamp_min(1)
+    )
+    return sequence_nll.view(batch_size, num_candidates)
 
 
 def validate_trainable_parameters(generator) -> list[torch.nn.Parameter]:
@@ -143,6 +306,7 @@ def validate_trainable_parameters(generator) -> list[torch.nn.Parameter]:
 
     allowed_prefixes = (
         "energy_model.feature_projector.",
+        "energy_model.visible_transform.",
         "energy_model.energy_bm.",
     )
     named_parameters = [
@@ -207,10 +371,25 @@ def main() -> None:
         bm_num_visible=args.bm_num_visible,
         bm_num_hidden=args.bm_num_hidden,
         bm_scoring_mode=args.bm_scoring_mode,
+        bm_visible_transform=args.bm_visible_transform,
         num_candidates=args.num_candidates,
         dtype=torch.float32,
         device=device,
     )
+    teacher_model = None
+    if args.objective == "ranking":
+        from transformers import AutoModelForCausalLM
+
+        teacher_model = (
+            AutoModelForCausalLM.from_pretrained(
+                args.ranking_teacher,
+                torch_dtype=torch.bfloat16,
+            )
+            .to(device)
+            .eval()
+        )
+        for parameter in teacher_model.parameters():
+            parameter.requires_grad = False
     train_loader = build_loader(
         train_texts,
         backbone.tokenizer,
@@ -236,8 +415,26 @@ def main() -> None:
     best_validation = float("inf")
     history = []
     for epoch in range(1, args.epochs + 1):
-        train_metrics = run_epoch(generator, train_loader, optimizer)
-        validation_metrics = run_epoch(generator, validation_loader, None)
+        epoch_kwargs = {
+            "objective": args.objective,
+            "teacher_model": teacher_model,
+            "ranking_loss": args.ranking_loss,
+            "teacher_temperature": args.teacher_temperature,
+            "ranking_energy_temperature": args.ranking_energy_temperature,
+            "binary_loss_weight": args.binary_loss_weight,
+        }
+        train_metrics = run_epoch(
+            generator,
+            train_loader,
+            optimizer,
+            **epoch_kwargs,
+        )
+        validation_metrics = run_epoch(
+            generator,
+            validation_loader,
+            None,
+            **epoch_kwargs,
+        )
         row = {
             "epoch": epoch,
             **{
@@ -263,6 +460,17 @@ def main() -> None:
                     "mdlm_checkpoint": args.checkpoint,
                     "tokenizer": args.tokenizer,
                     "max_length": args.max_length,
+                    "objective": args.objective,
+                    "ranking_teacher": (
+                        args.ranking_teacher
+                        if args.objective == "ranking"
+                        else None
+                    ),
+                    "ranking_loss": (
+                        args.ranking_loss
+                        if args.objective == "ranking"
+                        else None
+                    ),
                 },
             )
 

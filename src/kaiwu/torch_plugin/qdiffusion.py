@@ -454,9 +454,11 @@ class QDiffusion(nn.Module):
         negative_tokens, _ = self._sample_candidates(logits, self.config.num_candidates)
         positive_energy = self.energy(noisy_tokens, target, target.ne(self.pad_id))
         positive_stats = self._collect_energy_model_stats()
-        negative_energy = self._score_candidates(noisy_tokens, negative_tokens).mean(
-            dim=1, keepdim=True
+        candidate_energies = self._score_candidates(
+            noisy_tokens,
+            negative_tokens,
         )
+        negative_energy = candidate_energies.mean(dim=1, keepdim=True)
         negative_stats = self._collect_energy_model_stats()
 
         energy_objective = (
@@ -472,6 +474,8 @@ class QDiffusion(nn.Module):
             "energy_objective": energy_objective,
             "positive_energy_mean": positive_energy.mean().detach(),
             "negative_energy_mean": negative_energy.mean().detach(),
+            "candidate_tokens": negative_tokens,
+            "candidate_energies": candidate_energies,
         }
         for prefix, stats in (
             ("positive", positive_stats),

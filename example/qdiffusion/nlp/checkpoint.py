@@ -28,6 +28,7 @@ def save_energy_checkpoint(
         "sampler_type": energy_model.sampler_type,
         "sampler_kwargs": energy_model.sampler_kwargs,
         "scoring_mode": energy_model.scoring_mode,
+        "visible_transform": energy_model.visible_transform.mode,
     }
     metadata.update(extra_metadata or {})
     torch.save(
@@ -37,6 +38,7 @@ def save_energy_checkpoint(
             "metadata": metadata,
             "state_dict": {
                 "feature_projector": energy_model.feature_projector.state_dict(),
+                "visible_transform": energy_model.visible_transform.state_dict(),
                 "energy_bm": energy_model.energy_bm.state_dict(),
             },
         },
@@ -65,4 +67,8 @@ def load_energy_weights(generator, checkpoint: dict[str, Any]) -> None:
         raise ValueError("Cannot load energy weights into a proposal-only model.")
     state_dict = checkpoint["state_dict"]
     energy_model.feature_projector.load_state_dict(state_dict["feature_projector"])
+    if "visible_transform" in state_dict:
+        energy_model.visible_transform.load_state_dict(
+            state_dict["visible_transform"]
+        )
     energy_model.energy_bm.load_state_dict(state_dict["energy_bm"])

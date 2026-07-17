@@ -21,6 +21,7 @@ def build_mdlm_qdiffusion(
     bm_sampler_type: str = "sa",
     bm_sampler_kwargs: dict[str, Any] | None = None,
     bm_scoring_mode: str = "sampler",
+    bm_visible_transform: str = "sigmoid",
     num_candidates: int = 1,
     proposal_temperature: float = 0.0,
     proposal_noise_scale: float = 1.0,
@@ -50,6 +51,7 @@ def build_mdlm_qdiffusion(
             sampler_type=bm_sampler_type,
             sampler_kwargs=bm_sampler_kwargs,
             scoring_mode=bm_scoring_mode,
+            visible_transform=bm_visible_transform,
         )
 
     generator = QDiffusion(

@@ -13,6 +13,35 @@ from .mdlm import MDLMBackbone
 from .sampler import build_bm_sampler
 
 
+class VisibleTransform(nn.Module):
+    """Maps projector outputs into continuous BM visible conditions."""
+
+    def __init__(self, num_visible: int, mode: str) -> None:
+        super().__init__()
+        if mode not in {"sigmoid", "identity", "layernorm"}:
+            raise ValueError(
+                "visible_transform must be 'sigmoid', 'identity', or 'layernorm'."
+            )
+        self.mode = mode
+        self.normalizer = nn.LayerNorm(
+            num_visible,
+            elementwise_affine=False,
+        )
+        self.scale = nn.Parameter(
+            torch.ones(()),
+            requires_grad=mode == "layernorm",
+        )
+
+    def forward(self, visible_logits: torch.Tensor) -> torch.Tensor:
+        """Returns continuous conditions accepted by Kaiwu BM sampling."""
+
+        if self.mode == "sigmoid":
+            return torch.sigmoid(visible_logits)
+        if self.mode == "identity":
+            return visible_logits
+        return self.scale * self.normalizer(visible_logits)
+
+
 def masked_mean_pool(
     hidden_states: torch.Tensor,
     attention_mask: torch.Tensor,
@@ -37,6 +66,7 @@ class MDLMConditionedEnergyModel(EnergyModel):
         sampler_type: str = "sa",
         sampler_kwargs: dict[str, Any] | None = None,
         scoring_mode: str = "sampler",
+        visible_transform: str = "sigmoid",
     ) -> None:
         self.sampler_type = sampler_type
         self.sampler_kwargs = dict(sampler_kwargs or {})
@@ -61,11 +91,23 @@ class MDLMConditionedEnergyModel(EnergyModel):
             2 * encoder.hidden_size,
             bm_num_visible,
         )
+        self.visible_transform = VisibleTransform(
+            bm_num_visible,
+            visible_transform,
+        )
         self.register_buffer(
             "_exact_hidden_states",
             torch.empty(0, bm_num_hidden),
             persistent=False,
         )
+
+    def discretize_visible_state(
+        self,
+        visible_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        """Preserves continuous visible conditions with a configurable transform."""
+
+        return self.visible_transform(visible_logits)
 
     def _get_exact_hidden_states(
         self,

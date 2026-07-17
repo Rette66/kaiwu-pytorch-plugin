@@ -180,6 +180,7 @@ def main() -> None:
         use_energy=use_energy,
         bm_num_visible=int(metadata.get("bm_num_visible", 64)),
         bm_num_hidden=int(metadata.get("bm_num_hidden", 32)),
+        bm_visible_transform=metadata.get("visible_transform", "sigmoid"),
         bm_sampler_type=metadata.get("sampler_type", "sa"),
         bm_sampler_kwargs=metadata.get("sampler_kwargs", {}),
         bm_scoring_mode=(

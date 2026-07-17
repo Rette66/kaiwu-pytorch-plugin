@@ -13,6 +13,7 @@ from example.qdiffusion.nlp.evaluation import (
 )
 from example.qdiffusion.nlp.eval_text_quality import compute_text_quality
 from example.qdiffusion.nlp.smoke_generate import load_prompts
+from example.qdiffusion.nlp.train_energy import candidate_teacher_nll
 from example.qdiffusion.nlp.builder import build_mdlm_qdiffusion
 from example.qdiffusion.nlp.checkpoint import (
     load_energy_weights,
@@ -229,6 +230,49 @@ def test_exact_bm_scoring_is_differentiable_and_skips_sampler():
     assert sampler.calls == 0
 
 
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("sigmoid", torch.tensor([[0.5, 0.880797]])),
+        ("identity", torch.tensor([[0.0, 2.0]])),
+    ],
+)
+def test_mdlm_visible_transform_modes(mode, expected):
+    backbone = MDLMBackbone(FakeMDLM(), FakeTokenizer(), mask_id=5)
+    energy_model = MDLMConditionedEnergyModel(
+        backbone,
+        bm_num_visible=2,
+        bm_num_hidden=1,
+        sampler=object(),
+        visible_transform=mode,
+    )
+
+    visible = energy_model.discretize_visible_state(
+        torch.tensor([[0.0, 2.0]])
+    )
+
+    assert torch.allclose(visible, expected, atol=1e-6)
+
+
+def test_mdlm_layernorm_visible_transform_preserves_gradient_and_scale():
+    backbone = MDLMBackbone(FakeMDLM(), FakeTokenizer(), mask_id=5)
+    energy_model = MDLMConditionedEnergyModel(
+        backbone,
+        bm_num_visible=3,
+        bm_num_hidden=1,
+        sampler=object(),
+        visible_transform="layernorm",
+    )
+    logits = torch.tensor([[1.0, 2.0, 4.0]], requires_grad=True)
+
+    visible = energy_model.discretize_visible_state(logits)
+    visible.square().sum().backward()
+
+    assert torch.allclose(visible.mean(dim=-1), torch.zeros(1), atol=1e-6)
+    assert logits.grad is not None
+    assert energy_model.visible_transform.scale.grad is not None
+
+
 def test_builder_and_checkpoint_keep_baseline_and_guided_paths_distinct(tmp_path):
     backbone = MDLMBackbone(FakeMDLM(), FakeTokenizer(), mask_id=5)
     baseline = build_mdlm_qdiffusion(
@@ -326,3 +370,19 @@ def test_prompt_suite_and_text_quality_metrics(tmp_path):
     assert metrics["num_sequences"] == 2
     assert metrics["distinct_1"] == pytest.approx(4 / 6)
     assert metrics["repetition_2"] > 0
+
+
+def test_candidate_teacher_nll_returns_one_score_per_candidate():
+    candidate_tokens = torch.tensor(
+        [[[1, 2, 3], [1, 2, 0]]],
+        dtype=torch.long,
+    )
+
+    nll = candidate_teacher_nll(
+        candidate_tokens,
+        FakeCausalLM(),
+        eos_token_id=0,
+    )
+
+    assert nll.shape == (1, 2)
+    assert torch.allclose(nll, torch.full_like(nll, torch.log(torch.tensor(4.0))))
