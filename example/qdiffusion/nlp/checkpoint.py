@@ -16,19 +16,15 @@ def save_energy_checkpoint(
     metric: float,
     extra_metadata: dict[str, Any] | None = None,
 ) -> None:
-    """Saves BM and projector weights without duplicating frozen MDLM weights."""
+    """Saves compact energy weights without duplicating frozen MDLM weights."""
 
     energy_model = generator.energy_model
     if energy_model is None:
         raise ValueError("Cannot save an energy checkpoint from a proposal-only model.")
     path.parent.mkdir(parents=True, exist_ok=True)
     metadata = {
-        "bm_num_visible": energy_model.bm_num_visible,
-        "bm_num_hidden": energy_model.bm_num_hidden,
-        "sampler_type": energy_model.sampler_type,
-        "sampler_kwargs": energy_model.sampler_kwargs,
-        "scoring_mode": energy_model.scoring_mode,
-        "visible_transform": energy_model.visible_transform.mode,
+        "energy_type": getattr(energy_model, "energy_type", "bm"),
+        **energy_model.checkpoint_metadata(),
     }
     metadata.update(extra_metadata or {})
     trainable_encoder_state = {
@@ -36,17 +32,14 @@ def save_energy_checkpoint(
         for name, parameter in energy_model.encoder.named_parameters()
         if parameter.requires_grad
     }
+    compact_state = energy_model.compact_state_dict()
+    compact_state["energy_encoder_trainable"] = trainable_encoder_state
     torch.save(
         {
             "epoch": epoch,
             "metric": metric,
             "metadata": metadata,
-            "state_dict": {
-                "feature_projector": energy_model.feature_projector.state_dict(),
-                "visible_transform": energy_model.visible_transform.state_dict(),
-                "energy_bm": energy_model.energy_bm.state_dict(),
-                "energy_encoder_trainable": trainable_encoder_state,
-            },
+            "state_dict": compact_state,
         },
         path,
     )
@@ -66,18 +59,20 @@ def read_energy_checkpoint(
 
 
 def load_energy_weights(generator, checkpoint: dict[str, Any]) -> None:
-    """Restores the learned projector and BM parameters."""
+    """Restores scalar or BM energy parameters."""
 
     energy_model = generator.energy_model
     if energy_model is None:
         raise ValueError("Cannot load energy weights into a proposal-only model.")
     state_dict = checkpoint["state_dict"]
-    energy_model.feature_projector.load_state_dict(state_dict["feature_projector"])
-    if "visible_transform" in state_dict:
-        energy_model.visible_transform.load_state_dict(
-            state_dict["visible_transform"]
+    checkpoint_type = checkpoint["metadata"].get("energy_type", "bm")
+    model_type = getattr(energy_model, "energy_type", "bm")
+    if checkpoint_type != model_type:
+        raise ValueError(
+            "Energy checkpoint type does not match the constructed model: "
+            f"checkpoint={checkpoint_type!r}, model={model_type!r}."
         )
-    energy_model.energy_bm.load_state_dict(state_dict["energy_bm"])
+    energy_model.load_compact_state_dict(state_dict)
     if state_dict.get("energy_encoder_trainable"):
         energy_model.encoder.load_state_dict(
             state_dict["energy_encoder_trainable"],

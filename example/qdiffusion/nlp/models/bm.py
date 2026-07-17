@@ -9,6 +9,7 @@ from torch import nn
 
 from kaiwu.torch_plugin import EnergyModel
 
+from .edlm import EDLMConditionedFeatureEncoder
 from .mdlm import MDLMBackbone
 from .sampler import build_bm_sampler
 
@@ -56,6 +57,8 @@ def masked_mean_pool(
 class MDLMConditionedEnergyModel(EnergyModel):
     """Uses frozen MDLM features to condition a trainable BM reranker."""
 
+    energy_type = "bm"
+
     def __init__(
         self,
         encoder: MDLMBackbone,
@@ -67,7 +70,13 @@ class MDLMConditionedEnergyModel(EnergyModel):
         sampler_kwargs: dict[str, Any] | None = None,
         scoring_mode: str = "sampler",
         visible_transform: str = "sigmoid",
+        feature_mode: str = "pooled_pair",
     ) -> None:
+        if feature_mode not in {"pooled_pair", "edlm_pair"}:
+            raise ValueError(
+                "feature_mode must be 'pooled_pair' or 'edlm_pair'."
+            )
+        self.feature_mode = feature_mode
         self.sampler_type = sampler_type
         self.sampler_kwargs = dict(sampler_kwargs or {})
         if scoring_mode not in {"sampler", "exact"}:
@@ -87,8 +96,17 @@ class MDLMConditionedEnergyModel(EnergyModel):
             sampler=bm_sampler,
         )
         self.encoder = encoder
+        self.conditioned_encoder = (
+            EDLMConditionedFeatureEncoder(encoder)
+            if feature_mode == "edlm_pair"
+            else None
+        )
         self.feature_projector = nn.Linear(
-            2 * encoder.hidden_size,
+            (
+                encoder.hidden_size
+                if feature_mode == "edlm_pair"
+                else 2 * encoder.hidden_size
+            ),
             bm_num_visible,
         )
         self.visible_transform = VisibleTransform(
@@ -182,6 +200,12 @@ class MDLMConditionedEnergyModel(EnergyModel):
     ) -> torch.Tensor:
         """Combines noisy-context and candidate-text sequence features."""
 
+        if self.conditioned_encoder is not None:
+            return self.conditioned_encoder(
+                self.encoder,
+                noisy_tokens,
+                candidate_tokens,
+            )
         noisy_hidden = self.encoder.encode_tokens(
             noisy_tokens,
             attention_mask=attention_mask,
@@ -234,6 +258,27 @@ class MDLMConditionedEnergyModel(EnergyModel):
         """Scores candidate sets while encoding each noisy context once."""
 
         batch_size, num_candidates, seq_len = candidate_tokens.shape
+        if self.conditioned_encoder is not None:
+            flat_noisy_tokens = (
+                noisy_tokens.unsqueeze(1)
+                .expand(-1, num_candidates, -1)
+                .reshape(batch_size * num_candidates, seq_len)
+            )
+            flat_candidate_tokens = candidate_tokens.reshape(
+                batch_size * num_candidates,
+                seq_len,
+            )
+            features = self.conditioned_encoder(
+                self.encoder,
+                flat_noisy_tokens,
+                flat_candidate_tokens,
+            )
+            visible_logits = self.feature_projector(
+                features.to(self.feature_projector.weight.dtype)
+            )
+            energy = self.score_visible_logits(visible_logits)
+            return energy.view(batch_size, num_candidates)
+
         flat_attention_mask = attention_mask.reshape(
             batch_size * num_candidates, seq_len
         )
@@ -264,3 +309,44 @@ class MDLMConditionedEnergyModel(EnergyModel):
         )
         energy = self.score_visible_logits(visible_logits)
         return energy.view(batch_size, num_candidates)
+
+    def checkpoint_metadata(self) -> dict[str, Any]:
+        """Returns compact BM architecture and sampler metadata."""
+
+        return {
+            "bm_num_visible": self.bm_num_visible,
+            "bm_num_hidden": self.bm_num_hidden,
+            "sampler_type": self.sampler_type,
+            "sampler_kwargs": self.sampler_kwargs,
+            "scoring_mode": self.scoring_mode,
+            "visible_transform": self.visible_transform.mode,
+            "feature_mode": self.feature_mode,
+        }
+
+    def compact_state_dict(self) -> dict[str, Any]:
+        """Returns trainable BM-side modules without the MDLM copy."""
+
+        state_dict = {
+            "feature_projector": self.feature_projector.state_dict(),
+            "visible_transform": self.visible_transform.state_dict(),
+            "energy_bm": self.energy_bm.state_dict(),
+        }
+        if self.conditioned_encoder is not None:
+            state_dict["conditioned_encoder"] = (
+                self.conditioned_encoder.state_dict()
+            )
+        return state_dict
+
+    def load_compact_state_dict(self, state_dict: dict[str, Any]) -> None:
+        """Restores compact BM-side modules."""
+
+        self.feature_projector.load_state_dict(state_dict["feature_projector"])
+        if "visible_transform" in state_dict:
+            self.visible_transform.load_state_dict(
+                state_dict["visible_transform"]
+            )
+        self.energy_bm.load_state_dict(state_dict["energy_bm"])
+        if self.conditioned_encoder is not None:
+            self.conditioned_encoder.load_state_dict(
+                state_dict["conditioned_encoder"]
+            )

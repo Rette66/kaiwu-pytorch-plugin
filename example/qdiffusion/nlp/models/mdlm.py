@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from kaiwu.torch_plugin.qdiffusion import SequenceTokenSpec
 
@@ -141,6 +142,69 @@ class MDLMBackbone(nn.Module):
         if not hidden_states:
             raise RuntimeError("MDLM checkpoint did not return hidden states.")
         return hidden_states[-1]
+
+    def build_conditioned_output_layer(self) -> nn.Module:
+        """Builds the hidden-width output layer used by EDLM-NCE."""
+
+        backbone = getattr(self.model, "backbone", None)
+        output_layer = getattr(backbone, "output_layer", None)
+        modulation = getattr(output_layer, "adaLN_modulation", None)
+        if output_layer is None or modulation is None:
+            raise AttributeError(
+                "MDLM backbone does not expose the DiT output-layer interface "
+                "required by EDLM-NCE."
+            )
+        return type(output_layer)(
+            self.hidden_size,
+            self.hidden_size,
+            int(modulation.in_features),
+        )
+
+    def encode_conditioned_tokens(
+        self,
+        noisy_tokens: torch.Tensor,
+        candidate_tokens: torch.Tensor,
+        *,
+        input_projection: nn.Module,
+        output_layer: nn.Module,
+    ) -> torch.Tensor:
+        """Runs the official EDLM-NCE joint ``(x_t, x_0)`` encoder path."""
+
+        backbone = getattr(self.model, "backbone", None)
+        required = ("vocab_embed", "sigma_map", "rotary_emb", "blocks")
+        missing = [
+            name
+            for name in required
+            if not hasattr(backbone, name)
+        ]
+        if missing:
+            raise AttributeError(
+                "MDLM backbone is missing EDLM-NCE components: "
+                + ", ".join(missing)
+            )
+        noisy_embeddings = backbone.vocab_embed(noisy_tokens)
+        candidate_embeddings = backbone.vocab_embed(candidate_tokens)
+        hidden_states = input_projection(
+            torch.cat([noisy_embeddings, candidate_embeddings], dim=-1)
+        )
+        conditioning = F.silu(
+            backbone.sigma_map(self._timesteps(noisy_tokens))
+        )
+        rotary_cos_sin = backbone.rotary_emb(hidden_states)
+        with torch.autocast(
+            device_type="cuda",
+            dtype=torch.bfloat16,
+            enabled=hidden_states.is_cuda,
+        ):
+            for block in backbone.blocks:
+                hidden_states = block(
+                    hidden_states,
+                    rotary_cos_sin,
+                    conditioning,
+                    seqlens=None,
+                )
+            hidden_states = output_layer(hidden_states, conditioning)
+        return hidden_states
 
     def train_last_blocks(self, num_blocks: int) -> list[str]:
         """Freezes the backbone except for its final transformer blocks."""

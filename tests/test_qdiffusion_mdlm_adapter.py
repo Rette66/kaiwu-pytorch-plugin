@@ -30,6 +30,7 @@ from example.qdiffusion.nlp.models.mdlm import (
     build_mdlm_token_spec,
 )
 from example.qdiffusion.nlp.models.bm import MDLMConditionedEnergyModel
+from example.qdiffusion.nlp.models.edlm import MDLMScalarEnergyModel
 
 
 class FakeMDLM(nn.Module):
@@ -84,6 +85,62 @@ class LayeredFakeMDLM(FakeMDLM):
         self.backbone.blocks = nn.ModuleList(
             [nn.Linear(1, 1) for _ in range(3)]
         )
+
+
+class FakeVocabEmbed(nn.Module):
+    def __init__(self, vocab_size: int = 6, hidden_size: int = 1) -> None:
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, hidden_size)
+
+    def forward(self, input_ids):
+        return self.embedding(input_ids)
+
+
+class FakeSigmaMap(nn.Module):
+    def __init__(self, cond_dim: int = 1) -> None:
+        super().__init__()
+        self.projection = nn.Linear(1, cond_dim)
+
+    def forward(self, timesteps):
+        return self.projection(timesteps.unsqueeze(-1))
+
+
+class FakeRotary(nn.Module):
+    def forward(self, hidden_states):
+        del hidden_states
+        return None
+
+
+class FakeConditionedBlock(nn.Module):
+    def __init__(self, hidden_size: int = 1) -> None:
+        super().__init__()
+        self.projection = nn.Linear(hidden_size, hidden_size)
+
+    def forward(self, hidden_states, rotary_cos_sin, conditioning, seqlens):
+        del rotary_cos_sin, conditioning, seqlens
+        return self.projection(hidden_states)
+
+
+class FakeConditionedOutput(nn.Module):
+    def __init__(self, hidden_size, out_channels, cond_dim) -> None:
+        super().__init__()
+        self.adaLN_modulation = nn.Linear(cond_dim, 2 * hidden_size)
+        self.linear = nn.Linear(hidden_size, out_channels)
+
+    def forward(self, hidden_states, conditioning):
+        del conditioning
+        return self.linear(hidden_states)
+
+
+class EDLMFakeMDLM(FakeMDLM):
+    def __init__(self) -> None:
+        super().__init__()
+        self.backbone = nn.Module()
+        self.backbone.vocab_embed = FakeVocabEmbed()
+        self.backbone.sigma_map = FakeSigmaMap()
+        self.backbone.rotary_emb = FakeRotary()
+        self.backbone.blocks = nn.ModuleList([FakeConditionedBlock()])
+        self.backbone.output_layer = FakeConditionedOutput(1, 6, 1)
 
 
 class FakeTokenizer:
@@ -215,6 +272,48 @@ def test_mdlm_conditioned_bm_is_the_qdiffusion_energy_path():
     assert energy_model.feature_projector.weight.grad is not None
 
 
+def test_edlm_scalar_energy_matches_joint_pair_pooling_and_scalar_head():
+    backbone = MDLMBackbone(EDLMFakeMDLM(), FakeTokenizer(), mask_id=5)
+    energy_model = MDLMScalarEnergyModel(backbone)
+    noisy_tokens = torch.tensor([[1, 5, 5]])
+    candidate_tokens = torch.tensor([[1, 3, 4]])
+
+    energy = energy_model.score_conditioned(
+        noisy_tokens,
+        candidate_tokens,
+        torch.ones_like(candidate_tokens, dtype=torch.bool),
+    )
+    energy.sum().backward()
+
+    assert energy.shape == (1, 1)
+    assert energy_model.conditioned_encoder.input_projection.weight.grad is not None
+    assert energy_model.energy_head[2].weight.grad is not None
+
+
+def test_bm_can_replace_only_the_edlm_scalar_head():
+    backbone = MDLMBackbone(EDLMFakeMDLM(), FakeTokenizer(), mask_id=5)
+    energy_model = RecordingMDLMEnergy(
+        backbone,
+        bm_num_visible=2,
+        bm_num_hidden=1,
+        sampler=object(),
+        feature_mode="edlm_pair",
+    )
+    noisy_tokens = torch.tensor([[1, 5, 5]])
+    candidate_tokens = torch.tensor([[1, 3, 4]])
+
+    energy = energy_model.score_conditioned(
+        noisy_tokens,
+        candidate_tokens,
+        torch.ones_like(candidate_tokens, dtype=torch.bool),
+    )
+    energy.sum().backward()
+
+    assert energy.shape == (1, 1)
+    assert energy_model.feature_projector.in_features == backbone.hidden_size
+    assert energy_model.conditioned_encoder.input_projection.weight.grad is not None
+
+
 def test_mdlm_candidate_scoring_encodes_noisy_context_once():
     model = CountingFakeMDLM()
     backbone = MDLMBackbone(model, FakeTokenizer(), mask_id=5)
@@ -338,6 +437,33 @@ def test_builder_and_checkpoint_keep_baseline_and_guided_paths_distinct(tmp_path
     assert guided.config.use_energy
     assert guided.config.num_candidates == 4
     assert torch.count_nonzero(guided.energy_model.feature_projector.weight).item() > 0
+
+
+def test_scalar_energy_checkpoint_round_trip(tmp_path):
+    backbone = MDLMBackbone(EDLMFakeMDLM(), FakeTokenizer(), mask_id=5)
+    scalar = build_mdlm_qdiffusion(
+        backbone,
+        use_energy=True,
+        energy_type="scalar",
+        energy_feature_mode="edlm_pair",
+        num_candidates=4,
+        dtype=torch.float32,
+    )
+    checkpoint_path = tmp_path / "scalar_energy.pt"
+    original_weight = scalar.energy_model.energy_head[2].weight.detach().clone()
+
+    save_energy_checkpoint(scalar, checkpoint_path, epoch=1, metric=0.5)
+    checkpoint = read_energy_checkpoint(checkpoint_path)
+    with torch.no_grad():
+        scalar.energy_model.energy_head[2].weight.zero_()
+    load_energy_weights(scalar, checkpoint)
+
+    assert checkpoint["metadata"]["energy_type"] == "scalar"
+    assert checkpoint["metadata"]["feature_mode"] == "edlm_pair"
+    assert torch.equal(
+        scalar.energy_model.energy_head[2].weight,
+        original_weight,
+    )
 
 
 def test_builder_exposes_proposal_resampling_controls():

@@ -69,6 +69,65 @@ a `text` field. The proposal MDLM always remains frozen. The energy-side MDLM
 is a separate copy and is frozen by default; optionally train its final
 transformer blocks with `--energy-unfreeze-last-layers`.
 
+### EDLM scalar baseline and head-only BM comparison
+
+The `scalar` energy follows the published
+[EDLM paper](https://arxiv.org/abs/2410.21357) and its
+[official implementation](https://github.com/MinkaiXu/Energy-Diffusion-LLM):
+embed `x_t` and candidate `x_0`, concatenate them token by token, project
+`2d -> d`, run the energy MDLM blocks, project back to hidden width, mean-pool
+the full sequence, and apply `Linear -> ReLU -> Linear` to obtain one scalar.
+Binary NCE trains real `x_0` toward lower energy and proposal samples toward
+higher energy. Candidate selection uses importance weights proportional to
+`exp(-energy)`.
+
+For an energy-structure-only comparison, use `edlm_pair` for both heads:
+
+- `scalar`: shared EDLM encoder followed by the scalar MLP.
+- `bm`: the same shared EDLM encoder followed by
+  `Projector -> sigmoid -> BM(V=64,H=32,SA)`.
+
+Keep the proposal checkpoint, dataset split, seed, candidate count, trainable
+MDLM blocks, optimizer, NCE objective, and generation settings identical. The
+older `pooled_pair` BM mode remains available only for compatibility with
+existing checkpoints; it is not the head-only EDLM comparison.
+
+Resolve one fresh seed at experiment time and pass it to both commands:
+
+```bash
+python -m example.qdiffusion.nlp.train_energy \
+  --input data/openwebtext_train.jsonl \
+  --output outputs/edlm_scalar_owt200_u1.pt \
+  --max-records 200 \
+  --max-length 64 \
+  --num-candidates 4 \
+  --energy-unfreeze-last-layers 1 \
+  --energy-type scalar \
+  --objective binary \
+  --seed <shared-seed>
+
+python -m example.qdiffusion.nlp.train_energy \
+  --input data/openwebtext_train.jsonl \
+  --output outputs/edlm_bm_owt200_v64h32_u1.pt \
+  --max-records 200 \
+  --max-length 64 \
+  --num-candidates 4 \
+  --energy-unfreeze-last-layers 1 \
+  --energy-type bm \
+  --energy-feature-mode edlm_pair \
+  --bm-num-visible 64 \
+  --bm-num-hidden 32 \
+  --bm-scoring-mode sampler \
+  --bm-visible-transform sigmoid \
+  --objective binary \
+  --seed <shared-seed>
+```
+
+This is an architecture- and objective-aligned EDLM-NCE baseline, not a claim
+of reproducing the paper's full OpenWebText training budget. The small run
+trains only the last MDLM block and uses 200 records so the scalar-vs-BM
+comparison remains controlled and affordable.
+
 ```bash
 python -m example.qdiffusion.nlp.train_energy \
   --input data/openwebtext_train.jsonl \

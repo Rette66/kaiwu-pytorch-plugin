@@ -50,6 +50,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=5e-5)
     parser.add_argument("--weight-decay", type=float, default=1e-2)
     parser.add_argument("--num-candidates", type=int, default=4)
+    parser.add_argument(
+        "--energy-type",
+        choices=("scalar", "bm"),
+        default="bm",
+        help="Scalar EDLM-NCE baseline or BM replacement energy.",
+    )
+    parser.add_argument(
+        "--energy-feature-mode",
+        choices=("pooled_pair", "edlm_pair"),
+        help=(
+            "Energy encoder path. Scalar energy always uses edlm_pair; use "
+            "edlm_pair for a head-only scalar-vs-BM comparison."
+        ),
+    )
     parser.add_argument("--bm-num-visible", type=int, default=64)
     parser.add_argument("--bm-num-hidden", type=int, default=32)
     parser.add_argument(
@@ -443,6 +457,8 @@ def validate_trainable_parameters(generator) -> list[torch.nn.Parameter]:
     """Ensures training cannot accidentally update the frozen MDLM backbone."""
 
     allowed_prefixes = (
+        "energy_model.conditioned_encoder.",
+        "energy_model.energy_head.",
         "energy_model.feature_projector.",
         "energy_model.visible_transform.",
         "energy_model.energy_bm.",
@@ -454,7 +470,7 @@ def validate_trainable_parameters(generator) -> list[torch.nn.Parameter]:
         if parameter.requires_grad
     ]
     if not named_parameters:
-        raise RuntimeError("No trainable Projector or BM parameters were found.")
+        raise RuntimeError("No trainable energy parameters were found.")
     unexpected = [
         name
         for name, _ in named_parameters
@@ -462,7 +478,7 @@ def validate_trainable_parameters(generator) -> list[torch.nn.Parameter]:
     ]
     if unexpected:
         raise RuntimeError(
-            "Unexpected trainable parameters outside Projector and BM: "
+            "Unexpected trainable parameters outside the energy model: "
             + ", ".join(unexpected)
         )
     return [parameter for _, parameter in named_parameters]
@@ -495,6 +511,17 @@ def main() -> None:
     if args.objective == "ranking" and args.recovery_ranking_weight:
         raise ValueError(
             "GPT-2 ranking and recovery ranking cannot be enabled together."
+        )
+    energy_feature_mode = args.energy_feature_mode
+    if energy_feature_mode is None:
+        energy_feature_mode = (
+            "edlm_pair"
+            if args.energy_type == "scalar"
+            else "pooled_pair"
+        )
+    if args.energy_type == "scalar" and energy_feature_mode != "edlm_pair":
+        raise ValueError(
+            "Scalar EDLM energy requires --energy-feature-mode edlm_pair."
         )
     if args.seed is None:
         args.seed = secrets.randbelow(2**31)
@@ -537,6 +564,8 @@ def main() -> None:
     generator = build_mdlm_qdiffusion(
         backbone,
         use_energy=True,
+        energy_type=args.energy_type,
+        energy_feature_mode=energy_feature_mode,
         energy_backbone=energy_backbone,
         bm_num_visible=args.bm_num_visible,
         bm_num_hidden=args.bm_num_hidden,
@@ -640,6 +669,7 @@ def main() -> None:
                     "energy_unfreeze_last_layers": (
                         args.energy_unfreeze_last_layers
                     ),
+                    "energy_feature_mode": energy_feature_mode,
                     "trainable_energy_parameters": len(
                         trainable_energy_names
                     ),

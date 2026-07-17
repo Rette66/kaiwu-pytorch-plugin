@@ -8,13 +8,20 @@ import torch
 
 from kaiwu.torch_plugin import QDiffusion, QDiffusionConfig
 
-from .models import MDLMBackbone, MDLMConditionedEnergyModel, build_mdlm_token_spec
+from .models import (
+    MDLMBackbone,
+    MDLMConditionedEnergyModel,
+    MDLMScalarEnergyModel,
+    build_mdlm_token_spec,
+)
 
 
 def build_mdlm_qdiffusion(
     backbone: MDLMBackbone,
     *,
     use_energy: bool,
+    energy_type: str = "bm",
+    energy_feature_mode: str = "pooled_pair",
     energy_backbone: MDLMBackbone | None = None,
     bm_num_visible: int = 64,
     bm_num_hidden: int = 32,
@@ -50,16 +57,28 @@ def build_mdlm_qdiffusion(
 
     energy_model = None
     if use_energy:
-        energy_model = MDLMConditionedEnergyModel(
-            encoder=energy_backbone or backbone,
-            bm_num_visible=bm_num_visible,
-            bm_num_hidden=bm_num_hidden,
-            sampler=bm_sampler,
-            sampler_type=bm_sampler_type,
-            sampler_kwargs=bm_sampler_kwargs,
-            scoring_mode=bm_scoring_mode,
-            visible_transform=bm_visible_transform,
-        )
+        if energy_type == "scalar":
+            if energy_feature_mode != "edlm_pair":
+                raise ValueError(
+                    "Scalar EDLM energy requires energy_feature_mode='edlm_pair'."
+                )
+            energy_model = MDLMScalarEnergyModel(
+                encoder=energy_backbone or backbone,
+            )
+        elif energy_type == "bm":
+            energy_model = MDLMConditionedEnergyModel(
+                encoder=energy_backbone or backbone,
+                bm_num_visible=bm_num_visible,
+                bm_num_hidden=bm_num_hidden,
+                sampler=bm_sampler,
+                sampler_type=bm_sampler_type,
+                sampler_kwargs=bm_sampler_kwargs,
+                scoring_mode=bm_scoring_mode,
+                visible_transform=bm_visible_transform,
+                feature_mode=energy_feature_mode,
+            )
+        else:
+            raise ValueError("energy_type must be 'scalar' or 'bm'.")
 
     generator = QDiffusion(
         proposal_model=backbone,
@@ -85,7 +104,7 @@ def build_mdlm_qdiffusion(
         device=resolved_device,
         freeze_proposal=True,
     )
-    if energy_model is not None:
+    if isinstance(energy_model, MDLMConditionedEnergyModel):
         # The MDLM transformer can run in bf16, but the sampler converts its
         # Ising matrix through NumPy, which requires float32 parameters.
         energy_model.feature_projector.to(dtype=torch.float32)
