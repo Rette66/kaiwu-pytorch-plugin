@@ -276,6 +276,32 @@ class TestQDiffusionNLP(unittest.TestCase):
         model.step(state)
         self.assertIsNotNone(energy_model.last_candidate_tokens)
 
+    def test_energy_guidance_stops_after_configured_decode_window(self):
+        energy_model = RecordingEnergyModel()
+        model = QDiffusion(
+            proposal_model=FixedProposalModel(),
+            energy_model=energy_model,
+            token_spec=build_token_spec(),
+            config=QDiffusionConfig(
+                num_candidates=2,
+                use_energy=True,
+                energy_guidance_start_ratio=0.0,
+                energy_guidance_end_ratio=0.25,
+                disable_resample=True,
+            ),
+            freeze_proposal=False,
+        )
+        state = model.initialize_state(
+            torch.tensor([[2, 3, 3]], dtype=torch.long),
+            max_steps=2,
+        )
+
+        state = model.step(state)
+        self.assertIsNotNone(energy_model.last_candidate_tokens)
+        energy_model.last_candidate_tokens = None
+        model.step(state)
+        self.assertIsNone(energy_model.last_candidate_tokens)
+
 
 if __name__ == "__main__":
     unittest.main()

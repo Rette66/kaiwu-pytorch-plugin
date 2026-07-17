@@ -77,6 +77,12 @@ def parse_args() -> argparse.Namespace:
         help="Fraction of decode steps completed before BM guidance starts.",
     )
     parser.add_argument(
+        "--energy-end-ratio",
+        type=float,
+        default=1.0,
+        help="Fraction of decode steps after which energy guidance stops.",
+    )
+    parser.add_argument(
         "--enable-resample",
         "--resample",
         dest="enable_resample",
@@ -179,6 +185,11 @@ def main() -> None:
     batch_size = args.batch_size or args.num_samples
     if batch_size <= 0:
         raise ValueError("--batch-size must be positive.")
+    if not 0.0 <= args.energy_start_ratio <= args.energy_end_ratio <= 1.0:
+        raise ValueError(
+            "Energy guidance ratios must satisfy "
+            "0 <= start <= end <= 1."
+        )
     if not 0.0 < args.resample_ratio <= 1.0:
         raise ValueError("--resample-ratio must be in (0, 1].")
     if not 0.0 < args.resample_top_p <= 1.0:
@@ -252,6 +263,7 @@ def main() -> None:
         residual_fallback_margin=args.residual_fallback_margin,
         include_greedy_candidate=args.include_greedy_candidate,
         energy_guidance_start_ratio=args.energy_start_ratio,
+        energy_guidance_end_ratio=args.energy_end_ratio,
         disable_resample=not args.enable_resample,
         resample_ratio=args.resample_ratio,
         resample_top_p=args.resample_top_p,

@@ -85,7 +85,9 @@ For an energy-structure-only comparison, use `edlm_pair` for both heads:
 
 - `scalar`: shared EDLM encoder followed by the scalar MLP.
 - `bm`: the same shared EDLM encoder followed by
-  `Projector -> sigmoid -> BM(V=64,H=32,SA)`.
+  `Projector -> identity -> BM(V=64,H=32,SA)`. The continuous projector
+  output is passed directly to Kaiwu SDK rather than rounded into a binary
+  visible state.
 
 Keep the proposal checkpoint, dataset split, seed, candidate count, trainable
 MDLM blocks, optimizer, NCE objective, and generation settings identical. The
@@ -100,7 +102,7 @@ python -m example.qdiffusion.nlp.train_energy \
   --output outputs/edlm_scalar_owt200_u1.pt \
   --max-records 200 \
   --max-length 64 \
-  --num-candidates 4 \
+  --num-candidates 1 \
   --energy-unfreeze-last-layers 1 \
   --energy-type scalar \
   --objective binary \
@@ -111,14 +113,14 @@ python -m example.qdiffusion.nlp.train_energy \
   --output outputs/edlm_bm_owt200_v64h32_u1.pt \
   --max-records 200 \
   --max-length 64 \
-  --num-candidates 4 \
+  --num-candidates 1 \
   --energy-unfreeze-last-layers 1 \
   --energy-type bm \
   --energy-feature-mode edlm_pair \
   --bm-num-visible 64 \
   --bm-num-hidden 32 \
   --bm-scoring-mode sampler \
-  --bm-visible-transform sigmoid \
+  --bm-visible-transform identity \
   --objective binary \
   --seed <shared-seed>
 ```
@@ -127,6 +129,24 @@ This is an architecture- and objective-aligned EDLM-NCE baseline, not a claim
 of reproducing the paper's full OpenWebText training budget. The small run
 trains only the last MDLM block and uses 200 records so the scalar-vs-BM
 comparison remains controlled and affordable.
+
+The official EDLM configuration uses one proposal negative for binary NCE and
+K=2 parallel importance sampling only in the middle diffusion-time window
+`t in [0.4, 0.6]`. In this decoder, diffusion time decreases while decode
+progress increases, so use the equivalent progress window:
+
+```bash
+python -m example.qdiffusion.nlp.smoke_generate \
+  --energy-checkpoint outputs/edlm_scalar_owt200_u1.pt \
+  --num-candidates 2 \
+  --energy-start-ratio 0.4 \
+  --energy-end-ratio 0.6 \
+  --output outputs/edlm_scalar_k2.jsonl
+```
+
+Run the BM checkpoint with the same K, guidance window, prompt set, generation
+seed, and decoding settings. Increasing K to 4 or 8 is a separate QDiffusion
+ablation rather than part of the EDLM-faithful baseline.
 
 ```bash
 python -m example.qdiffusion.nlp.train_energy \

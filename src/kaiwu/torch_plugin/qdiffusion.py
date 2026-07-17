@@ -97,6 +97,7 @@ class QDiffusionConfig:
     residual_fallback_margin: float = 0.0
     include_greedy_candidate: bool = False
     energy_guidance_start_ratio: float = 0.0
+    energy_guidance_end_ratio: float = 1.0
     use_energy: bool = True
     suppress_eos: bool = True
     disable_resample: bool = False
@@ -296,6 +297,18 @@ class QDiffusion(nn.Module):
         if not 0.0 <= self.config.energy_guidance_start_ratio <= 1.0:
             raise ValueError(
                 "energy_guidance_start_ratio must be between 0 and 1."
+            )
+        if not 0.0 <= self.config.energy_guidance_end_ratio <= 1.0:
+            raise ValueError(
+                "energy_guidance_end_ratio must be between 0 and 1."
+            )
+        if (
+            self.config.energy_guidance_start_ratio
+            > self.config.energy_guidance_end_ratio
+        ):
+            raise ValueError(
+                "energy_guidance_start_ratio must not exceed "
+                "energy_guidance_end_ratio."
             )
         self.dtype = dtype
 
@@ -1209,6 +1222,8 @@ class QDiffusion(nn.Module):
                 self.config.use_energy
                 and guidance_progress
                 >= self.config.energy_guidance_start_ratio
+                and guidance_progress
+                <= self.config.energy_guidance_end_ratio
             )
         else:
             use_energy = self.config.use_energy and use_energy
