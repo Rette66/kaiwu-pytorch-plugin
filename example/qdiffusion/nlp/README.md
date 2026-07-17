@@ -4,8 +4,9 @@ This directory contains both sides of the NLP experiment:
 
 - **MDLM baseline:** MDLM proposes tokens and QDiffusion runs iterative
   denoising, with BM reranking disabled.
-- **QDiffusion-NLP:** the same frozen MDLM proposes multiple candidates; MDLM
-  hidden states condition a trainable BM, and BM energy reranks the candidates.
+- **QDiffusion-NLP:** the same frozen MDLM proposes multiple candidates; a
+  separate energy-side MDLM encodes them, its hidden states condition a
+  trainable BM, and BM energy reranks the candidates.
 
 Keeping both paths is intentional: every claim about QDiffusion must be measured
 against the identical decoder with only the BM energy path switched off.
@@ -40,15 +41,17 @@ and the smoke script trims decoded output at the first EOS token.
 ## Train and use the QDiffusion energy model
 
 Prepare a `.txt` file with one training document per line, or a JSONL file with
-a `text` field. Only the feature projector and BM are trained; MDLM remains
-frozen.
+a `text` field. The proposal MDLM always remains frozen. The energy-side MDLM
+is a separate copy and is frozen by default; optionally train its final
+transformer blocks with `--energy-unfreeze-last-layers`.
 
 ```bash
 python -m example.qdiffusion.nlp.train_energy \
   --input data/openwebtext_train.jsonl \
   --output outputs/mdlm_bm_energy.pt \
   --max-length 256 \
-  --num-candidates 4
+  --num-candidates 4 \
+  --energy-unfreeze-last-layers 1
 ```
 
 Then run actual BM-guided QDiffusion. Supplying `--energy-checkpoint` switches
@@ -60,6 +63,21 @@ python -m example.qdiffusion.nlp.smoke_generate \
   --num-candidates 8 \
   --num-samples 8 \
   --output outputs/qdiffusion_samples.jsonl
+```
+
+Before comparing full generations, measure whether the energy model can
+actually order candidates from held-out diffusion states. The diagnostic
+reports BM top-1 and pairwise accuracy, causal-LM NLL regret against an oracle
+candidate choice, and the positive-versus-negative energy margin.
+
+```bash
+python -m example.qdiffusion.nlp.eval_energy_ranking \
+  --input data/openwebtext_train.jsonl \
+  --offset 200 \
+  --max-records 64 \
+  --energy-checkpoint outputs/mdlm_bm_energy.pt \
+  --num-candidates 4 \
+  --output outputs/mdlm_bm_ranking.json
 ```
 
 ## Perplexity metrics

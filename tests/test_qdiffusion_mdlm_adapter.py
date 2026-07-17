@@ -12,6 +12,7 @@ from example.qdiffusion.nlp.evaluation import (
     compute_generative_perplexity,
 )
 from example.qdiffusion.nlp.eval_text_quality import compute_text_quality
+from example.qdiffusion.nlp import eval_energy_ranking
 from example.qdiffusion.nlp.smoke_generate import load_prompts
 from example.qdiffusion.nlp.train_energy import candidate_teacher_nll
 from example.qdiffusion.nlp.builder import build_mdlm_qdiffusion
@@ -416,3 +417,50 @@ def test_candidate_teacher_nll_returns_one_score_per_candidate():
 
     assert nll.shape == (1, 2)
     assert torch.allclose(nll, torch.full_like(nll, torch.log(torch.tensor(4.0))))
+
+
+def test_energy_ranking_diagnostic_compares_candidate_orderings(monkeypatch):
+    class FakeProposal:
+        def eval(self):
+            return self
+
+    class FakeGenerator:
+        eos_id = 0
+        proposal_model = FakeProposal()
+        config = SimpleNamespace(num_candidates=3)
+
+        def eval(self):
+            return self
+
+        def objective(self, batch):
+            del batch
+            return {
+                "candidate_tokens": torch.zeros(2, 3, 2, dtype=torch.long),
+                "candidate_energies": torch.tensor(
+                    [[0.0, 1.0, 2.0], [2.0, 1.0, 0.0]]
+                ),
+                "positive_energy_mean": torch.tensor(-1.0),
+                "negative_energy_mean": torch.tensor(1.0),
+            }
+
+    monkeypatch.setattr(
+        eval_energy_ranking,
+        "candidate_teacher_nll",
+        lambda *args, **kwargs: torch.tensor(
+            [[0.0, 1.0, 2.0], [0.0, 1.0, 2.0]]
+        ),
+    )
+
+    metrics = eval_energy_ranking.evaluate_ranking(
+        FakeGenerator(),
+        [{"targets": torch.zeros(2, 2, dtype=torch.long)}],
+        teacher_model=object(),
+    )
+
+    assert metrics["ranking_top1_accuracy"] == 0.5
+    assert metrics["ranking_pairwise_accuracy"] == 0.5
+    assert metrics["ranking_spearman"] == 0.0
+    assert metrics["selected_teacher_nll"] == 1.0
+    assert metrics["oracle_teacher_nll"] == 0.0
+    assert metrics["candidate_mean_teacher_nll"] == 1.0
+    assert metrics["energy_margin"] == 2.0
