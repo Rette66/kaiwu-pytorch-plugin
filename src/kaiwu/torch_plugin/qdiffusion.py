@@ -523,6 +523,7 @@ class QDiffusion(nn.Module):
         )
         return new_state
 
+    @torch.no_grad()
     def generate(
         self,
         input_tokens: torch.Tensor,
