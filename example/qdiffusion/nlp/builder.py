@@ -29,6 +29,14 @@ def build_mdlm_qdiffusion(
 ) -> QDiffusion:
     """Builds the shared MDLM baseline or the actual BM-guided variant."""
 
+    if device is None:
+        try:
+            resolved_device = next(backbone.parameters()).device
+        except StopIteration:
+            resolved_device = torch.device("cpu")
+    else:
+        resolved_device = torch.device(device)
+
     energy_model = None
     if use_energy:
         energy_model = MDLMConditionedEnergyModel(
@@ -54,7 +62,7 @@ def build_mdlm_qdiffusion(
             disable_resample=True,
         ),
         dtype=dtype,
-        device=device,
+        device=resolved_device,
         freeze_proposal=True,
     )
     if energy_model is not None:

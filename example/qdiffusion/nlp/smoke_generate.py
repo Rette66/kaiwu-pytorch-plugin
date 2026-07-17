@@ -38,6 +38,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--steps", type=int, default=64)
     parser.add_argument("--num-samples", type=int, default=1)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        help="Generation batch size; defaults to --num-samples.",
+    )
     parser.add_argument("--energy-checkpoint", type=Path)
     parser.add_argument("--num-candidates", type=int)
     parser.add_argument("--energy-temperature", type=float, default=1.0)
@@ -85,6 +90,9 @@ def main() -> None:
     args = parse_args()
     if args.num_samples <= 0:
         raise ValueError("--num-samples must be positive.")
+    batch_size = args.batch_size or args.num_samples
+    if batch_size <= 0:
+        raise ValueError("--batch-size must be positive.")
     torch.manual_seed(args.seed)
     if not torch.cuda.is_available():
         raise RuntimeError(
@@ -105,7 +113,9 @@ def main() -> None:
         MDLMBackbone.from_pretrained(
             args.checkpoint,
             tokenizer_name_or_path=args.tokenizer,
-            torch_dtype=torch.bfloat16,
+            # The released MDLM keeps its timestep MLP in float32 and enables
+            # bf16 autocast only inside the transformer backbone.
+            torch_dtype=torch.float32,
         )
         .to(device)
         .eval()
@@ -122,24 +132,29 @@ def main() -> None:
         bm_sampler_kwargs=metadata.get("sampler_kwargs", {}),
         num_candidates=num_candidates,
         energy_temperature=args.energy_temperature,
-        dtype=torch.bfloat16,
+        dtype=torch.float32,
         device=device,
     )
     if energy_checkpoint is not None:
         load_energy_weights(generator, energy_checkpoint)
-    input_tokens, fixed_prompt, prompt_length = build_prompt_canvas(
-        backbone,
-        args.prompt,
-        args.max_new_tokens,
-        args.num_samples,
-        device,
-    )
-    output = generator.generate(
-        input_tokens,
-        max_steps=args.steps,
-        partial_masks=fixed_prompt,
-    )
-    responses = decode_responses(output, backbone.tokenizer, prompt_length)
+    responses = []
+    for batch_start in range(0, args.num_samples, batch_size):
+        current_batch_size = min(batch_size, args.num_samples - batch_start)
+        input_tokens, fixed_prompt, prompt_length = build_prompt_canvas(
+            backbone,
+            args.prompt,
+            args.max_new_tokens,
+            current_batch_size,
+            device,
+        )
+        output = generator.generate(
+            input_tokens,
+            max_steps=args.steps,
+            partial_masks=fixed_prompt,
+        )
+        responses.extend(
+            decode_responses(output, backbone.tokenizer, prompt_length)
+        )
     for index, response in enumerate(responses):
         print(f"sample[{index}]: {response}")
     if args.output is not None:

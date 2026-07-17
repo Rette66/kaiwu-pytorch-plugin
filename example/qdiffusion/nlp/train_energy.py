@@ -142,7 +142,9 @@ def main() -> None:
         MDLMBackbone.from_pretrained(
             args.checkpoint,
             tokenizer_name_or_path=args.tokenizer,
-            torch_dtype=torch.bfloat16,
+            # The released MDLM timestep embedding is explicitly float32.
+            # Its transformer blocks manage bf16 autocast internally.
+            torch_dtype=torch.float32,
         )
         .to(device)
         .eval()
@@ -153,7 +155,7 @@ def main() -> None:
         bm_num_visible=args.bm_num_visible,
         bm_num_hidden=args.bm_num_hidden,
         num_candidates=args.num_candidates,
-        dtype=torch.bfloat16,
+        dtype=torch.float32,
         device=device,
     )
     train_loader = build_loader(
