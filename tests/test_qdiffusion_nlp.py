@@ -158,6 +158,57 @@ class TestQDiffusionNLP(unittest.TestCase):
 
         self.assertFalse(outputs["loss_mask"][~maskable_mask].any())
 
+    def test_hybrid_candidate_scoring_combines_energy_and_proposal_scores(self):
+        energy_model = RecordingEnergyModel()
+        model = QDiffusion(
+            proposal_model=FixedProposalModel(),
+            energy_model=energy_model,
+            token_spec=build_token_spec(),
+            config=QDiffusionConfig(
+                use_energy=True,
+                proposal_score_weight=2.0,
+            ),
+            freeze_proposal=False,
+        )
+        noisy_tokens = torch.tensor([[3, 3]])
+        candidate_tokens = torch.tensor([[[1, 7], [7, 1]]])
+        candidate_scores = torch.tensor(
+            [[[-10.0, -10.0], [0.0, 0.0]]]
+        )
+        torch.manual_seed(0)
+
+        selected_tokens, _ = model._select_candidates(
+            noisy_tokens,
+            candidate_tokens,
+            candidate_scores,
+        )
+
+        self.assertTrue(torch.equal(selected_tokens, candidate_tokens[:, 1]))
+
+    def test_delayed_energy_guidance_skips_early_decode_steps(self):
+        energy_model = RecordingEnergyModel()
+        model = QDiffusion(
+            proposal_model=FixedProposalModel(),
+            energy_model=energy_model,
+            token_spec=build_token_spec(),
+            config=QDiffusionConfig(
+                num_candidates=2,
+                use_energy=True,
+                energy_guidance_start_ratio=0.5,
+                disable_resample=True,
+            ),
+            freeze_proposal=False,
+        )
+        state = model.initialize_state(
+            torch.tensor([[2, 3, 3]], dtype=torch.long),
+            max_steps=2,
+        )
+
+        state = model.step(state)
+        self.assertIsNone(energy_model.last_candidate_tokens)
+        model.step(state)
+        self.assertIsNotNone(energy_model.last_candidate_tokens)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,6 +25,8 @@ def build_mdlm_qdiffusion(
     proposal_temperature: float = 0.0,
     proposal_noise_scale: float = 1.0,
     energy_temperature: float = 1.0,
+    proposal_score_weight: float = 0.0,
+    energy_guidance_start_ratio: float = 0.0,
     dtype: torch.dtype = torch.float32,
     device: torch.device | str | None = None,
 ) -> QDiffusion:
@@ -59,6 +61,8 @@ def build_mdlm_qdiffusion(
             proposal_temperature=proposal_temperature,
             proposal_noise_scale=proposal_noise_scale,
             energy_temperature=energy_temperature,
+            proposal_score_weight=proposal_score_weight,
+            energy_guidance_start_ratio=energy_guidance_start_ratio,
             use_energy=use_energy,
             suppress_eos=False,
             disable_resample=True,

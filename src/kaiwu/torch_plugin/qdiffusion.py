@@ -92,6 +92,8 @@ class QDiffusionConfig:
     proposal_temperature: float = 0.0
     proposal_noise_scale: float = 1.0
     energy_temperature: float = 1.0
+    proposal_score_weight: float = 0.0
+    energy_guidance_start_ratio: float = 0.0
     use_energy: bool = True
     suppress_eos: bool = True
     disable_resample: bool = False
@@ -288,6 +290,10 @@ class QDiffusion(nn.Module):
         self.energy_model = energy_model
         self.token_spec = token_spec
         self.config = config or QDiffusionConfig()
+        if not 0.0 <= self.config.energy_guidance_start_ratio <= 1.0:
+            raise ValueError(
+                "energy_guidance_start_ratio must be between 0 and 1."
+            )
         self.dtype = dtype
 
         if freeze_proposal:
@@ -838,6 +844,8 @@ class QDiffusion(nn.Module):
         noisy_tokens: torch.Tensor,
         candidate_tokens: torch.Tensor,
         candidate_scores: torch.Tensor,
+        *,
+        use_energy: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Selects one candidate per batch element by energy-based reranking.
 
@@ -850,12 +858,34 @@ class QDiffusion(nn.Module):
             tuple[torch.Tensor, torch.Tensor]: A tuple ``(tokens, scores)``
             for the selected candidate per sample.
         """
-        if self.config.use_energy:
+        if use_energy is None:
+            use_energy = self.config.use_energy
+        if use_energy:
             energies = self._score_candidates(noisy_tokens, candidate_tokens)
-            neg_energies = -energies
-            neg_energies = neg_energies - neg_energies.max(dim=-1, keepdim=True)[0]
+            selection_logits = -energies / self.config.energy_temperature
+            if self.config.proposal_score_weight:
+                proposal_sequence_scores = candidate_scores.sum(dim=-1)
+                centered_scores = (
+                    proposal_sequence_scores
+                    - proposal_sequence_scores.mean(dim=-1, keepdim=True)
+                )
+                score_scale = centered_scores.std(
+                    dim=-1,
+                    keepdim=True,
+                    unbiased=False,
+                ).clamp_min(1e-6)
+                selection_logits = selection_logits + (
+                    self.config.proposal_score_weight
+                    * centered_scores
+                    / score_scale
+                )
+            selection_logits = selection_logits - selection_logits.max(
+                dim=-1,
+                keepdim=True,
+            )[0]
             weights = torch.softmax(
-                neg_energies / self.config.energy_temperature, dim=-1
+                selection_logits,
+                dim=-1,
             )
             selected_idx = torch.multinomial(weights, 1).squeeze(-1)
         else:
@@ -949,8 +979,17 @@ class QDiffusion(nn.Module):
             fixed_scores = output_scores[:, None, :].expand_as(candidate_scores)
             candidate_tokens = torch.where(fixed_mask, fixed_tokens, candidate_tokens)
             candidate_scores = torch.where(fixed_mask, fixed_scores, candidate_scores)
+        guidance_progress = state["step"] / max(state["max_steps"], 1)
+        use_energy = (
+            self.config.use_energy
+            and guidance_progress
+            >= self.config.energy_guidance_start_ratio
+        )
         selected_tokens, selected_scores = self._select_candidates(
-            output_tokens, candidate_tokens, candidate_scores
+            output_tokens,
+            candidate_tokens,
+            candidate_scores,
+            use_energy=use_energy,
         )
 
         if not self.config.disable_resample:

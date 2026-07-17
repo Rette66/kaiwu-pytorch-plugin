@@ -56,6 +56,18 @@ def parse_args() -> argparse.Namespace:
         help="Overrides the energy checkpoint scoring mode.",
     )
     parser.add_argument("--energy-temperature", type=float, default=1.0)
+    parser.add_argument(
+        "--proposal-score-weight",
+        type=float,
+        default=0.0,
+        help="Standardized proposal-score weight used with BM energy.",
+    )
+    parser.add_argument(
+        "--energy-start-ratio",
+        type=float,
+        default=0.0,
+        help="Fraction of decode steps completed before BM guidance starts.",
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
@@ -176,6 +188,8 @@ def main() -> None:
         ),
         num_candidates=num_candidates,
         energy_temperature=args.energy_temperature,
+        proposal_score_weight=args.proposal_score_weight,
+        energy_guidance_start_ratio=args.energy_start_ratio,
         dtype=torch.float32,
         device=device,
     )
