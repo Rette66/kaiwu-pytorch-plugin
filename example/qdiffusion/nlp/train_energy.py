@@ -86,14 +86,20 @@ def build_loader(
     )
 
 
-def run_epoch(generator, loader: DataLoader, optimizer: AdamW | None) -> float:
-    """Runs one train or validation epoch and returns example-weighted loss."""
+def run_epoch(
+    generator,
+    loader: DataLoader,
+    optimizer: AdamW | None,
+) -> dict[str, float]:
+    """Runs one epoch and returns example-weighted energy metrics."""
 
     training = optimizer is not None
     generator.train(training)
     generator.proposal_model.eval()
     total_loss = 0.0
     total_examples = 0
+    positive_energy_total = 0.0
+    negative_energy_total = 0.0
     context = torch.enable_grad if training else torch.no_grad
     with context():
         for batch in loader:
@@ -109,8 +115,49 @@ def run_epoch(generator, loader: DataLoader, optimizer: AdamW | None) -> float:
                 optimizer.step()
             batch_size = int(batch["targets"].size(0))
             total_loss += float(loss) * batch_size
+            positive_energy_total += (
+                float(outputs["positive_energy_mean"]) * batch_size
+            )
+            negative_energy_total += (
+                float(outputs["negative_energy_mean"]) * batch_size
+            )
             total_examples += batch_size
-    return total_loss / max(total_examples, 1)
+    denominator = max(total_examples, 1)
+    positive_energy = positive_energy_total / denominator
+    negative_energy = negative_energy_total / denominator
+    return {
+        "energy_objective": total_loss / denominator,
+        "positive_energy": positive_energy,
+        "negative_energy": negative_energy,
+        "energy_margin": negative_energy - positive_energy,
+    }
+
+
+def validate_trainable_parameters(generator) -> list[torch.nn.Parameter]:
+    """Ensures training cannot accidentally update the frozen MDLM backbone."""
+
+    allowed_prefixes = (
+        "energy_model.feature_projector.",
+        "energy_model.energy_bm.",
+    )
+    named_parameters = [
+        (name, parameter)
+        for name, parameter in generator.named_parameters()
+        if parameter.requires_grad
+    ]
+    if not named_parameters:
+        raise RuntimeError("No trainable Projector or BM parameters were found.")
+    unexpected = [
+        name
+        for name, _ in named_parameters
+        if not name.startswith(allowed_prefixes)
+    ]
+    if unexpected:
+        raise RuntimeError(
+            "Unexpected trainable parameters outside Projector and BM: "
+            + ", ".join(unexpected)
+        )
+    return [parameter for _, parameter in named_parameters]
 
 
 def split_texts(texts: list[str], seed: int) -> tuple[list[str], list[str]]:
@@ -175,7 +222,7 @@ def main() -> None:
         shuffle=False,
     )
     optimizer = AdamW(
-        [parameter for parameter in generator.parameters() if parameter.requires_grad],
+        validate_trainable_parameters(generator),
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
     )
@@ -183,15 +230,22 @@ def main() -> None:
     best_validation = float("inf")
     history = []
     for epoch in range(1, args.epochs + 1):
-        train_loss = run_epoch(generator, train_loader, optimizer)
-        validation_loss = run_epoch(generator, validation_loader, None)
+        train_metrics = run_epoch(generator, train_loader, optimizer)
+        validation_metrics = run_epoch(generator, validation_loader, None)
         row = {
             "epoch": epoch,
-            "train_energy_objective": train_loss,
-            "validation_energy_objective": validation_loss,
+            **{
+                f"train_{key}": value
+                for key, value in train_metrics.items()
+            },
+            **{
+                f"validation_{key}": value
+                for key, value in validation_metrics.items()
+            },
         }
         history.append(row)
         print(json.dumps(row))
+        validation_loss = validation_metrics["energy_objective"]
         if validation_loss < best_validation:
             best_validation = validation_loss
             save_energy_checkpoint(
