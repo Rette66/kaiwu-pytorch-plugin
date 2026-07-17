@@ -62,6 +62,13 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Standardized proposal-score weight used with BM energy.",
     )
+    parser.add_argument("--residual-guidance-weight", type=float)
+    parser.add_argument("--residual-fallback-margin", type=float, default=0.0)
+    parser.add_argument(
+        "--include-greedy-candidate",
+        action="store_true",
+        help="Reserves candidate zero for the deterministic MDLM argmax.",
+    )
     parser.add_argument(
         "--energy-start-ratio",
         type=float,
@@ -190,6 +197,9 @@ def main() -> None:
         num_candidates=num_candidates,
         energy_temperature=args.energy_temperature,
         proposal_score_weight=args.proposal_score_weight,
+        residual_guidance_weight=args.residual_guidance_weight,
+        residual_fallback_margin=args.residual_fallback_margin,
+        include_greedy_candidate=args.include_greedy_candidate,
         energy_guidance_start_ratio=args.energy_start_ratio,
         dtype=torch.float32,
         device=device,

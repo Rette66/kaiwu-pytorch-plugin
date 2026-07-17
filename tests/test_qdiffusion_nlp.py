@@ -185,6 +185,73 @@ class TestQDiffusionNLP(unittest.TestCase):
 
         self.assertTrue(torch.equal(selected_tokens, candidate_tokens[:, 1]))
 
+    def test_candidate_zero_is_greedy_and_scores_use_original_logits(self):
+        model = QDiffusion(
+            proposal_model=FixedProposalModel(),
+            energy_model=None,
+            token_spec=build_token_spec(),
+            config=QDiffusionConfig(
+                num_candidates=3,
+                proposal_noise_scale=10.0,
+                include_greedy_candidate=True,
+                use_energy=False,
+            ),
+            freeze_proposal=False,
+        )
+        logits = torch.tensor(
+            [[[0.0, 1.0, 2.0], [3.0, 1.0, 0.0]]]
+        )
+
+        candidate_tokens, candidate_scores = model._sample_candidates(
+            logits,
+            num_candidates=3,
+        )
+
+        self.assertTrue(
+            torch.equal(candidate_tokens[:, 0], logits.argmax(dim=-1))
+        )
+        expected_scores = logits.log_softmax(dim=-1).unsqueeze(1).expand(
+            -1, 3, -1, -1
+        ).gather(
+            -1,
+            candidate_tokens.unsqueeze(-1),
+        ).squeeze(-1)
+        self.assertTrue(torch.allclose(candidate_scores, expected_scores))
+
+    def test_residual_guidance_can_prefer_proposal_or_fallback_to_greedy(self):
+        energy_model = RecordingEnergyModel()
+        noisy_tokens = torch.tensor([[3, 3]])
+        candidate_tokens = torch.tensor([[[1, 1], [7, 7]]])
+        candidate_scores = torch.tensor(
+            [[[-10.0, -10.0], [0.0, 0.0]]]
+        )
+        model = QDiffusion(
+            proposal_model=FixedProposalModel(),
+            energy_model=energy_model,
+            token_spec=build_token_spec(),
+            config=QDiffusionConfig(
+                use_energy=True,
+                include_greedy_candidate=True,
+                residual_guidance_weight=0.25,
+            ),
+            freeze_proposal=False,
+        )
+
+        selected_tokens, _ = model._select_candidates(
+            noisy_tokens,
+            candidate_tokens,
+            candidate_scores,
+        )
+        self.assertTrue(torch.equal(selected_tokens, candidate_tokens[:, 1]))
+
+        model.config.residual_fallback_margin = 2.0
+        selected_tokens, _ = model._select_candidates(
+            noisy_tokens,
+            candidate_tokens,
+            candidate_scores,
+        )
+        self.assertTrue(torch.equal(selected_tokens, candidate_tokens[:, 0]))
+
     def test_delayed_energy_guidance_skips_early_decode_steps(self):
         energy_model = RecordingEnergyModel()
         model = QDiffusion(

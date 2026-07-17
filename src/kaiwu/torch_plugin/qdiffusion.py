@@ -93,6 +93,9 @@ class QDiffusionConfig:
     proposal_noise_scale: float = 1.0
     energy_temperature: float = 1.0
     proposal_score_weight: float = 0.0
+    residual_guidance_weight: float | None = None
+    residual_fallback_margin: float = 0.0
+    include_greedy_candidate: bool = False
     energy_guidance_start_ratio: float = 0.0
     use_energy: bool = True
     suppress_eos: bool = True
@@ -809,16 +812,51 @@ class QDiffusion(nn.Module):
             tuple[torch.Tensor, torch.Tensor]: A tuple ``(tokens, scores)`` shaped as
             ``[batch, num_candidates, seq_len]``.
         """
-        samples, scores = stochastic_sample_from_categorical_n(
-            logits,
-            temperature=self.config.proposal_temperature,
-            noise_scale=self.config.proposal_noise_scale,
-            n=num_candidates,
-        )
         batch_size = logits.size(0)
+        sampled_count = num_candidates
+        greedy_tokens = None
+        if self.config.include_greedy_candidate:
+            sampled_count -= 1
+            greedy_tokens = logits.argmax(dim=-1, keepdim=False)
+
+        if sampled_count:
+            samples, _ = stochastic_sample_from_categorical_n(
+                logits,
+                temperature=self.config.proposal_temperature,
+                noise_scale=self.config.proposal_noise_scale,
+                n=sampled_count,
+            )
+            candidate_tokens = self._reshape_candidates(
+                samples,
+                batch_size,
+                sampled_count,
+            )
+        else:
+            candidate_tokens = logits.new_empty(
+                batch_size,
+                0,
+                logits.size(1),
+                dtype=torch.long,
+            )
+        if greedy_tokens is not None:
+            candidate_tokens = torch.cat(
+                [greedy_tokens.unsqueeze(1), candidate_tokens],
+                dim=1,
+            )
+
+        proposal_log_probs = logits.log_softmax(dim=-1)
+        candidate_scores = proposal_log_probs.unsqueeze(1).expand(
+            -1,
+            num_candidates,
+            -1,
+            -1,
+        ).gather(
+            dim=-1,
+            index=candidate_tokens.unsqueeze(-1),
+        ).squeeze(-1)
         return (
-            self._reshape_candidates(samples, batch_size, num_candidates),
-            self._reshape_candidates(scores, batch_size, num_candidates),
+            candidate_tokens,
+            candidate_scores,
         )
 
     def _score_candidates(
@@ -866,32 +904,71 @@ class QDiffusion(nn.Module):
             use_energy = self.config.use_energy
         if use_energy:
             energies = self._score_candidates(noisy_tokens, candidate_tokens)
-            selection_logits = -energies / self.config.energy_temperature
-            if self.config.proposal_score_weight:
+            if self.config.residual_guidance_weight is not None:
                 proposal_sequence_scores = candidate_scores.sum(dim=-1)
-                centered_scores = (
-                    proposal_sequence_scores
-                    - proposal_sequence_scores.mean(dim=-1, keepdim=True)
-                )
-                score_scale = centered_scores.std(
+                proposal_scale = proposal_sequence_scores.std(
                     dim=-1,
                     keepdim=True,
                     unbiased=False,
                 ).clamp_min(1e-6)
-                selection_logits = selection_logits + (
-                    self.config.proposal_score_weight
-                    * centered_scores
-                    / score_scale
+                proposal_z = (
+                    proposal_sequence_scores
+                    - proposal_sequence_scores.mean(dim=-1, keepdim=True)
+                ) / proposal_scale
+                energy_scale = energies.std(
+                    dim=-1,
+                    keepdim=True,
+                    unbiased=False,
+                ).clamp_min(1e-6)
+                energy_z = (
+                    energies - energies.mean(dim=-1, keepdim=True)
+                ) / energy_scale
+                selection_logits = proposal_z - (
+                    self.config.residual_guidance_weight * energy_z
                 )
-            selection_logits = selection_logits - selection_logits.max(
-                dim=-1,
-                keepdim=True,
-            )[0]
-            weights = torch.softmax(
-                selection_logits,
-                dim=-1,
-            )
-            selected_idx = torch.multinomial(weights, 1).squeeze(-1)
+                selected_idx = selection_logits.argmax(dim=-1)
+                if self.config.include_greedy_candidate:
+                    selected_score = selection_logits.gather(
+                        dim=-1,
+                        index=selected_idx.unsqueeze(-1),
+                    ).squeeze(-1)
+                    baseline_score = selection_logits[:, 0]
+                    use_residual = (
+                        selected_score - baseline_score
+                        >= self.config.residual_fallback_margin
+                    )
+                    selected_idx = torch.where(
+                        use_residual,
+                        selected_idx,
+                        torch.zeros_like(selected_idx),
+                    )
+            else:
+                selection_logits = -energies / self.config.energy_temperature
+                if self.config.proposal_score_weight:
+                    proposal_sequence_scores = candidate_scores.sum(dim=-1)
+                    centered_scores = (
+                        proposal_sequence_scores
+                        - proposal_sequence_scores.mean(dim=-1, keepdim=True)
+                    )
+                    score_scale = centered_scores.std(
+                        dim=-1,
+                        keepdim=True,
+                        unbiased=False,
+                    ).clamp_min(1e-6)
+                    selection_logits = selection_logits + (
+                        self.config.proposal_score_weight
+                        * centered_scores
+                        / score_scale
+                    )
+                selection_logits = selection_logits - selection_logits.max(
+                    dim=-1,
+                    keepdim=True,
+                )[0]
+                weights = torch.softmax(
+                    selection_logits,
+                    dim=-1,
+                )
+                selected_idx = torch.multinomial(weights, 1).squeeze(-1)
         else:
             proposal_sequence_scores = candidate_scores.sum(dim=-1)
             selected_idx = proposal_sequence_scores.argmax(dim=-1)
