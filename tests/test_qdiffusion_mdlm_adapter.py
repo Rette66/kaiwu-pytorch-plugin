@@ -11,6 +11,8 @@ from example.qdiffusion.nlp.evaluation import (
     causal_lm_nll,
     compute_generative_perplexity,
 )
+from example.qdiffusion.nlp.eval_text_quality import compute_text_quality
+from example.qdiffusion.nlp.smoke_generate import load_prompts
 from example.qdiffusion.nlp.builder import build_mdlm_qdiffusion
 from example.qdiffusion.nlp.checkpoint import (
     load_energy_weights,
@@ -57,6 +59,16 @@ class FakeMDLM(nn.Module):
         if output_hidden_states:
             hidden_states = (input_ids.float().unsqueeze(-1),)
         return SimpleNamespace(logits=logits, hidden_states=hidden_states)
+
+
+class CountingFakeMDLM(FakeMDLM):
+    def __init__(self) -> None:
+        super().__init__()
+        self.forward_batch_sizes = []
+
+    def forward(self, **kwargs):
+        self.forward_batch_sizes.append(kwargs["input_ids"].size(0))
+        return super().forward(**kwargs)
 
 
 class FakeTokenizer:
@@ -167,6 +179,56 @@ def test_mdlm_conditioned_bm_is_the_qdiffusion_energy_path():
     assert energy_model.feature_projector.weight.grad is not None
 
 
+def test_mdlm_candidate_scoring_encodes_noisy_context_once():
+    model = CountingFakeMDLM()
+    backbone = MDLMBackbone(model, FakeTokenizer(), mask_id=5)
+    energy_model = RecordingMDLMEnergy(
+        backbone,
+        bm_num_visible=2,
+        bm_num_hidden=1,
+        sampler=object(),
+    )
+    noisy_tokens = torch.tensor([[1, 5, 5]])
+    candidate_tokens = torch.tensor(
+        [[[2, 3, 0], [4, 2, 0], [3, 4, 2]]]
+    )
+    attention_mask = candidate_tokens.ne(0)
+
+    scores = energy_model.score_candidates_conditioned(
+        noisy_tokens,
+        candidate_tokens,
+        attention_mask,
+    )
+
+    assert scores.shape == (1, 3)
+    assert model.forward_batch_sizes == [1, 3]
+    assert energy_model.last_visible_logits.shape == (3, 2)
+
+
+def test_exact_bm_scoring_is_differentiable_and_skips_sampler():
+    sampler = FakeBMSampler()
+    backbone = MDLMBackbone(FakeMDLM(), FakeTokenizer(), mask_id=5)
+    energy_model = MDLMConditionedEnergyModel(
+        backbone,
+        bm_num_visible=2,
+        bm_num_hidden=2,
+        sampler=sampler,
+        scoring_mode="exact",
+    ).to("cpu")
+    visible_logits = torch.tensor(
+        [[-1.0, 0.5], [0.25, 1.0]],
+        requires_grad=True,
+    )
+
+    scores = energy_model.score_visible_logits(visible_logits)
+    scores.sum().backward()
+
+    assert scores.shape == (2, 1)
+    assert visible_logits.grad is not None
+    assert energy_model.energy_bm.quadratic_coef.grad is not None
+    assert sampler.calls == 0
+
+
 def test_builder_and_checkpoint_keep_baseline_and_guided_paths_distinct(tmp_path):
     backbone = MDLMBackbone(FakeMDLM(), FakeTokenizer(), mask_id=5)
     baseline = build_mdlm_qdiffusion(
@@ -246,3 +308,21 @@ def test_generative_perplexity_is_token_weighted():
     assert result.perplexity == pytest.approx(4.0)
     assert result.num_tokens == 3
     assert result.num_sequences == 2
+
+
+def test_prompt_suite_and_text_quality_metrics(tmp_path):
+    prompts_path = tmp_path / "prompts.jsonl"
+    prompts_path.write_text(
+        '{"prompt":"First prompt"}\n{"prompt":"Second prompt"}\n',
+        encoding="utf-8",
+    )
+
+    prompts = load_prompts(None, prompts_path)
+    metrics = compute_text_quality(
+        ["alpha beta alpha beta", "gamma delta"]
+    )
+
+    assert prompts == ["First prompt", "Second prompt"]
+    assert metrics["num_sequences"] == 2
+    assert metrics["distinct_1"] == pytest.approx(4 / 6)
+    assert metrics["repetition_2"] > 0

@@ -50,6 +50,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-candidates", type=int, default=4)
     parser.add_argument("--bm-num-visible", type=int, default=64)
     parser.add_argument("--bm-num-hidden", type=int, default=32)
+    parser.add_argument(
+        "--bm-scoring-mode",
+        choices=("sampler", "exact"),
+        default="sampler",
+    )
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
@@ -201,6 +206,7 @@ def main() -> None:
         use_energy=True,
         bm_num_visible=args.bm_num_visible,
         bm_num_hidden=args.bm_num_hidden,
+        bm_scoring_mode=args.bm_scoring_mode,
         num_candidates=args.num_candidates,
         dtype=torch.float32,
         device=device,

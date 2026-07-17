@@ -34,7 +34,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", default="kuleshov-group/mdlm-owt")
     parser.add_argument("--tokenizer", default="gpt2")
-    parser.add_argument("--prompt", default="Diffusion language models")
+    parser.add_argument("--prompt")
+    parser.add_argument(
+        "--prompts-file",
+        type=Path,
+        help="Plain-text or JSONL prompts; JSONL records use the 'prompt' field.",
+    )
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--steps", type=int, default=64)
     parser.add_argument("--num-samples", type=int, default=1)
@@ -45,10 +50,45 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--energy-checkpoint", type=Path)
     parser.add_argument("--num-candidates", type=int)
+    parser.add_argument(
+        "--bm-scoring-mode",
+        choices=("sampler", "exact"),
+        help="Overrides the energy checkpoint scoring mode.",
+    )
     parser.add_argument("--energy-temperature", type=float, default=1.0)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
+
+
+def load_prompts(prompt: str | None, prompts_file: Path | None) -> list[str]:
+    """Loads a single prompt or a prompt suite from disk."""
+
+    if prompt is not None and prompts_file is not None:
+        raise ValueError("--prompt and --prompts-file are mutually exclusive.")
+    if prompts_file is None:
+        return [prompt or "Diffusion language models"]
+
+    prompts = []
+    for line_number, raw_line in enumerate(
+        prompts_file.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        if not raw_line.strip():
+            continue
+        if prompts_file.suffix.lower() == ".jsonl":
+            record = json.loads(raw_line)
+            value = record.get("prompt")
+        else:
+            value = raw_line.strip()
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"Invalid prompt on line {line_number} of {prompts_file}."
+            )
+        prompts.append(value.strip())
+    if not prompts:
+        raise ValueError(f"No prompts found in {prompts_file}.")
+    return prompts
 
 
 def build_prompt_canvas(
@@ -130,6 +170,10 @@ def main() -> None:
         bm_num_hidden=int(metadata.get("bm_num_hidden", 32)),
         bm_sampler_type=metadata.get("sampler_type", "sa"),
         bm_sampler_kwargs=metadata.get("sampler_kwargs", {}),
+        bm_scoring_mode=(
+            args.bm_scoring_mode
+            or metadata.get("scoring_mode", "sampler")
+        ),
         num_candidates=num_candidates,
         energy_temperature=args.energy_temperature,
         dtype=torch.float32,
@@ -137,36 +181,39 @@ def main() -> None:
     )
     if energy_checkpoint is not None:
         load_energy_weights(generator, energy_checkpoint)
-    responses = []
-    for batch_start in range(0, args.num_samples, batch_size):
-        current_batch_size = min(batch_size, args.num_samples - batch_start)
-        input_tokens, fixed_prompt, prompt_length = build_prompt_canvas(
-            backbone,
-            args.prompt,
-            args.max_new_tokens,
-            current_batch_size,
-            device,
-        )
-        output = generator.generate(
-            input_tokens,
-            max_steps=args.steps,
-            partial_masks=fixed_prompt,
-        )
-        responses.extend(
-            decode_responses(output, backbone.tokenizer, prompt_length)
-        )
-    for index, response in enumerate(responses):
-        print(f"sample[{index}]: {response}")
+    prompts = load_prompts(args.prompt, args.prompts_file)
+    records = []
+    for prompt_index, prompt in enumerate(prompts):
+        prompt_responses = []
+        for batch_start in range(0, args.num_samples, batch_size):
+            current_batch_size = min(
+                batch_size,
+                args.num_samples - batch_start,
+            )
+            input_tokens, fixed_prompt, prompt_length = build_prompt_canvas(
+                backbone,
+                prompt,
+                args.max_new_tokens,
+                current_batch_size,
+                device,
+            )
+            output = generator.generate(
+                input_tokens,
+                max_steps=args.steps,
+                partial_masks=fixed_prompt,
+            )
+            prompt_responses.extend(
+                decode_responses(output, backbone.tokenizer, prompt_length)
+            )
+        for sample_index, response in enumerate(prompt_responses):
+            print(f"prompt[{prompt_index}] sample[{sample_index}]: {response}")
+            records.append({"prompt": prompt, "text": response})
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         with args.output.open("w", encoding="utf-8") as output_file:
-            for response in responses:
+            for record in records:
                 output_file.write(
-                    json.dumps(
-                        {"prompt": args.prompt, "text": response},
-                        ensure_ascii=False,
-                    )
-                    + "\n"
+                    json.dumps(record, ensure_ascii=False) + "\n"
                 )
 
 

@@ -27,6 +27,7 @@ def save_energy_checkpoint(
         "bm_num_hidden": energy_model.bm_num_hidden,
         "sampler_type": energy_model.sampler_type,
         "sampler_kwargs": energy_model.sampler_kwargs,
+        "scoring_mode": energy_model.scoring_mode,
     }
     metadata.update(extra_metadata or {})
     torch.save(

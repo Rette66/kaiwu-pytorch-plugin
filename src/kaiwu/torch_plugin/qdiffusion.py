@@ -142,6 +142,38 @@ class EnergyModel(nn.Module):
             "EnergyModel subclasses must implement score_conditioned()."
         )
 
+    def score_candidates_conditioned(
+        self,
+        noisy_tokens: torch.Tensor,
+        candidate_tokens: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Scores multiple candidates per noisy sequence.
+
+        Subclasses can override this method to reuse conditioning features
+        across candidates. The default implementation preserves the original
+        flattened-batch behavior.
+        """
+
+        batch_size, num_candidates, seq_len = candidate_tokens.shape
+        flat_noisy_tokens = (
+            noisy_tokens.unsqueeze(1)
+            .expand(-1, num_candidates, -1)
+            .reshape(batch_size * num_candidates, seq_len)
+        )
+        flat_candidate_tokens = candidate_tokens.reshape(
+            batch_size * num_candidates, seq_len
+        )
+        flat_attention_mask = attention_mask.reshape(
+            batch_size * num_candidates, seq_len
+        )
+        energy = self.score_conditioned(
+            noisy_tokens=flat_noisy_tokens,
+            candidate_tokens=flat_candidate_tokens,
+            attention_mask=flat_attention_mask,
+        )
+        return energy.view(batch_size, num_candidates)
+
     def discretize_visible_state(self, visible_logits: torch.Tensor) -> torch.Tensor:
         """Converts visible logits into normalized BM visible conditions."""
         return torch.sigmoid(visible_logits)
@@ -792,20 +824,14 @@ class QDiffusion(nn.Module):
         Returns:
             torch.Tensor: Candidate energies shaped as ``[batch, num_candidates]``.
         """
-        batch_size, num_candidates, seq_len = candidate_tokens.shape
-        flat_noisy_tokens = (
-            noisy_tokens.unsqueeze(1)
-            .expand(-1, num_candidates, -1)
-            .reshape(batch_size * num_candidates, seq_len)
+        if self.energy_model is None:
+            raise RuntimeError("Energy scoring is disabled for this QDiffusion model.")
+        attention_mask = candidate_tokens.ne(self.pad_id)
+        return self.energy_model.score_candidates_conditioned(
+            noisy_tokens=noisy_tokens,
+            candidate_tokens=candidate_tokens,
+            attention_mask=attention_mask,
         )
-        flat_candidate_tokens = candidate_tokens.reshape(
-            batch_size * num_candidates, seq_len
-        )
-        flat_attention_mask = flat_candidate_tokens.ne(self.pad_id)
-        energy = self.energy(
-            flat_noisy_tokens, flat_candidate_tokens, flat_attention_mask
-        )
-        return energy.view(batch_size, num_candidates)
 
     def _select_candidates(
         self,

@@ -20,6 +20,7 @@ def build_mdlm_qdiffusion(
     bm_sampler: Any | None = None,
     bm_sampler_type: str = "sa",
     bm_sampler_kwargs: dict[str, Any] | None = None,
+    bm_scoring_mode: str = "sampler",
     num_candidates: int = 1,
     proposal_temperature: float = 0.0,
     proposal_noise_scale: float = 1.0,
@@ -46,6 +47,7 @@ def build_mdlm_qdiffusion(
             sampler=bm_sampler,
             sampler_type=bm_sampler_type,
             sampler_kwargs=bm_sampler_kwargs,
+            scoring_mode=bm_scoring_mode,
         )
 
     generator = QDiffusion(
