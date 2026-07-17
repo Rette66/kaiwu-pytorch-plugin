@@ -13,7 +13,7 @@ from example.qdiffusion.nlp.evaluation import (
 )
 from example.qdiffusion.nlp.eval_text_quality import compute_text_quality
 from example.qdiffusion.nlp import eval_energy_ranking
-from example.qdiffusion.nlp.smoke_generate import load_prompts
+from example.qdiffusion.nlp.smoke_generate import load_prompts, parse_args
 from example.qdiffusion.nlp.train_energy import (
     candidate_recovery_scores,
     candidate_teacher_nll,
@@ -338,6 +338,66 @@ def test_builder_and_checkpoint_keep_baseline_and_guided_paths_distinct(tmp_path
     assert guided.config.use_energy
     assert guided.config.num_candidates == 4
     assert torch.count_nonzero(guided.energy_model.feature_projector.weight).item() > 0
+
+
+def test_builder_exposes_proposal_resampling_controls():
+    backbone = MDLMBackbone(FakeMDLM(), FakeTokenizer(), mask_id=5)
+
+    baseline = build_mdlm_qdiffusion(
+        backbone,
+        use_energy=False,
+        disable_resample=False,
+        resample_ratio=0.15,
+        resample_top_p=0.9,
+        dtype=torch.float32,
+    )
+
+    assert not baseline.config.disable_resample
+    assert baseline.config.resample_ratio == pytest.approx(0.15)
+    assert baseline.config.resample_top_p == pytest.approx(0.9)
+
+
+def test_enabled_resampler_reenters_proposal_model():
+    proposal = CountingFakeMDLM()
+    backbone = MDLMBackbone(proposal, FakeTokenizer(), mask_id=5)
+    baseline = build_mdlm_qdiffusion(
+        backbone,
+        use_energy=False,
+        proposal_noise_scale=0.0,
+        disable_resample=False,
+        resample_ratio=0.5,
+        dtype=torch.float32,
+    )
+    input_tokens = torch.tensor([[1, 5, 5, 5, 5]])
+    fixed_prompt = torch.tensor([[True, False, False, False, False]])
+
+    baseline.generate(
+        input_tokens,
+        max_steps=1,
+        partial_masks=fixed_prompt,
+    )
+
+    assert proposal.forward_batch_sizes == [1, 1]
+
+
+def test_smoke_cli_exposes_proposal_resampling_controls(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "smoke_generate",
+            "--enable-resample",
+            "--resample-ratio",
+            "0.15",
+            "--resample-top-p",
+            "0.9",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.enable_resample
+    assert args.resample_ratio == pytest.approx(0.15)
+    assert args.resample_top_p == pytest.approx(0.9)
 
 
 def test_guided_generation_reaches_conditioned_bm_sampler():

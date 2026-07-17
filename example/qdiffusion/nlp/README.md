@@ -40,6 +40,28 @@ and the smoke script trims decoded output at the first EOS token. Generation
 uses a fresh recorded seed when `--seed` is omitted; pass an explicit seed only
 when aligned control groups must share the same candidate stream.
 
+The NLP builder preserves the earlier no-resampling behavior by default. To
+run a proposal-only repetition-control experiment, enable the existing
+repetition-triggered resampler explicitly and tune its token-frequency trigger
+and nucleus cutoff:
+
+```bash
+python -m example.qdiffusion.nlp.smoke_generate \
+  --prompt "Diffusion language models" \
+  --max-new-tokens 64 \
+  --steps 64 \
+  --num-samples 32 \
+  --enable-resample \
+  --resample-ratio 0.15 \
+  --resample-top-p 0.90 \
+  --output outputs/mdlm_resample_r015_p090.jsonl
+```
+
+Keep `--energy-checkpoint` unset for this decoder-only control. Compare it with
+the no-resampling baseline under the same recorded seed, prompts, output length,
+and decode steps, and report Gen PPL together with repetition and distinct
+metrics.
+
 ## Train and use the QDiffusion energy model
 
 Prepare a `.txt` file with one training document per line, or a JSONL file with

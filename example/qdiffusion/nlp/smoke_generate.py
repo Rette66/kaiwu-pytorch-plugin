@@ -76,6 +76,25 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Fraction of decode steps completed before BM guidance starts.",
     )
+    parser.add_argument(
+        "--enable-resample",
+        "--resample",
+        dest="enable_resample",
+        action="store_true",
+        help="Enable repetition-triggered proposal resampling.",
+    )
+    parser.add_argument(
+        "--resample-ratio",
+        type=float,
+        default=0.25,
+        help="Repeated-token frequency ratio that triggers resampling.",
+    )
+    parser.add_argument(
+        "--resample-top-p",
+        type=float,
+        default=0.95,
+        help="Nucleus cutoff used when resampling repeated tokens.",
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument(
         "--seed",
@@ -160,6 +179,10 @@ def main() -> None:
     batch_size = args.batch_size or args.num_samples
     if batch_size <= 0:
         raise ValueError("--batch-size must be positive.")
+    if not 0.0 < args.resample_ratio <= 1.0:
+        raise ValueError("--resample-ratio must be in (0, 1].")
+    if not 0.0 < args.resample_top_p <= 1.0:
+        raise ValueError("--resample-top-p must be in (0, 1].")
     torch.manual_seed(args.seed)
     if not torch.cuda.is_available():
         raise RuntimeError(
@@ -227,6 +250,9 @@ def main() -> None:
         residual_fallback_margin=args.residual_fallback_margin,
         include_greedy_candidate=args.include_greedy_candidate,
         energy_guidance_start_ratio=args.energy_start_ratio,
+        disable_resample=not args.enable_resample,
+        resample_ratio=args.resample_ratio,
+        resample_top_p=args.resample_top_p,
         dtype=torch.float32,
         device=device,
     )
