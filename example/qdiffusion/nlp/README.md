@@ -36,7 +36,9 @@ python -m example.qdiffusion.nlp.smoke_generate \
 ```
 
 The current decoder uses a fixed token canvas. EOS is available to the model,
-and the smoke script trims decoded output at the first EOS token.
+and the smoke script trims decoded output at the first EOS token. Generation
+uses a fresh recorded seed when `--seed` is omitted; pass an explicit seed only
+when aligned control groups must share the same candidate stream.
 
 ## Train and use the QDiffusion energy model
 
@@ -52,6 +54,23 @@ python -m example.qdiffusion.nlp.train_energy \
   --max-length 256 \
   --num-candidates 4 \
   --energy-unfreeze-last-layers 1
+```
+
+To train on proposal states encountered along the reverse process, enable a
+proposal-only rollout and the target-token recovery ranking auxiliary. When
+`--seed` is omitted, the trainer generates a fresh seed and records it in both
+stdout and checkpoint metadata.
+
+```bash
+python -m example.qdiffusion.nlp.train_energy \
+  --input data/openwebtext_train.jsonl \
+  --output outputs/mdlm_bm_on_policy.pt \
+  --num-candidates 4 \
+  --energy-unfreeze-last-layers 1 \
+  --on-policy-rollout-steps 4 \
+  --on-policy-max-steps 64 \
+  --recovery-ranking-weight 0.25 \
+  --recovery-ranking-temperature 0.05
 ```
 
 Then run actual BM-guided QDiffusion. Supplying `--energy-checkpoint` switches

@@ -6,8 +6,10 @@ import argparse
 import json
 from pathlib import Path
 import random
+import secrets
 import sys
 
+import numpy as np
 import torch
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
@@ -80,7 +82,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--teacher-temperature", type=float, default=1.0)
     parser.add_argument("--ranking-energy-temperature", type=float, default=1.0)
     parser.add_argument("--binary-loss-weight", type=float, default=0.1)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--on-policy-rollout-steps",
+        type=int,
+        default=0,
+        help="Proposal-only reverse steps used to build training states.",
+    )
+    parser.add_argument("--on-policy-max-steps", type=int, default=64)
+    parser.add_argument("--recovery-ranking-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--recovery-ranking-temperature",
+        type=float,
+        default=0.05,
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        help="Random seed. A fresh recorded seed is generated when omitted.",
+    )
     return parser.parse_args()
 
 
@@ -116,6 +135,48 @@ def build_loader(
     )
 
 
+def candidate_recovery_scores(
+    outputs: dict[str, torch.Tensor],
+) -> torch.Tensor:
+    """Returns masked-target token accuracy for every proposal candidate."""
+
+    candidate_tokens = outputs["candidate_tokens"]
+    targets = outputs["targets"].unsqueeze(1)
+    recovery_mask = outputs["loss_mask"].unsqueeze(1).bool()
+    correct = candidate_tokens.eq(targets) & recovery_mask
+    denominator = recovery_mask.sum(dim=-1).clamp_min(1)
+    return correct.sum(dim=-1).float() / denominator
+
+
+def recovery_ranking_objective(
+    candidate_energies: torch.Tensor,
+    recovery_scores: torch.Tensor,
+    *,
+    target_temperature: float,
+    energy_temperature: float,
+) -> torch.Tensor:
+    """Distills target-token recovery ordering into candidate energies."""
+
+    if target_temperature <= 0 or energy_temperature <= 0:
+        raise ValueError("Ranking temperatures must be positive.")
+    informative = recovery_scores.max(dim=-1).values.gt(
+        recovery_scores.min(dim=-1).values
+    )
+    if not informative.any():
+        return candidate_energies.sum() * 0.0
+    target_probabilities = torch.softmax(
+        recovery_scores[informative] / target_temperature,
+        dim=-1,
+    )
+    energy_log_probabilities = torch.log_softmax(
+        -candidate_energies[informative] / energy_temperature,
+        dim=-1,
+    )
+    return -(
+        target_probabilities * energy_log_probabilities
+    ).sum(dim=-1).mean()
+
+
 def run_epoch(
     generator,
     loader: DataLoader,
@@ -127,6 +188,10 @@ def run_epoch(
     teacher_temperature: float = 1.0,
     ranking_energy_temperature: float = 1.0,
     binary_loss_weight: float = 0.1,
+    on_policy_rollout_steps: int = 0,
+    on_policy_max_steps: int = 64,
+    recovery_ranking_weight: float = 0.0,
+    recovery_ranking_temperature: float = 0.05,
 ) -> dict[str, float]:
     """Runs one epoch and returns example-weighted energy metrics."""
 
@@ -142,10 +207,19 @@ def run_epoch(
     ranking_spread_total = 0.0
     pairwise_correct = 0
     pairwise_total = 0
+    recovery_ranking_correct = 0
+    recovery_regret_total = 0.0
+    recovery_spread_total = 0.0
+    recovery_pairwise_correct = 0
+    recovery_pairwise_total = 0
     context = torch.enable_grad if training else torch.no_grad
     with context():
         for batch in loader:
-            outputs = generator.objective(batch)
+            outputs = generator.objective(
+                batch,
+                rollout_steps=on_policy_rollout_steps,
+                rollout_max_steps=on_policy_max_steps,
+            )
             binary_loss = (
                 outputs["energy_objective"] * outputs["weight"]
             ).mean()
@@ -220,6 +294,48 @@ def run_epoch(
                         - teacher_nll.min(dim=-1).values
                     ).sum()
                 )
+            elif recovery_ranking_weight:
+                candidate_energies = outputs["candidate_energies"]
+                recovery_scores = candidate_recovery_scores(outputs)
+                recovery_objective = recovery_ranking_objective(
+                    candidate_energies,
+                    recovery_scores,
+                    target_temperature=recovery_ranking_temperature,
+                    energy_temperature=ranking_energy_temperature,
+                )
+                loss = (
+                    binary_loss
+                    + recovery_ranking_weight * recovery_objective
+                )
+                energy_best = candidate_energies.argmin(dim=-1)
+                selected_recovery = recovery_scores.gather(
+                    dim=-1,
+                    index=energy_best.unsqueeze(-1),
+                ).squeeze(-1)
+                best_recovery = recovery_scores.max(dim=-1).values
+                worst_recovery = recovery_scores.min(dim=-1).values
+                recovery_ranking_correct += int(
+                    selected_recovery.eq(best_recovery).sum()
+                )
+                recovery_regret_total += float(
+                    (best_recovery - selected_recovery).sum()
+                )
+                recovery_spread_total += float(
+                    (best_recovery - worst_recovery).sum()
+                )
+                recovery_difference = (
+                    recovery_scores.unsqueeze(-1)
+                    - recovery_scores.unsqueeze(-2)
+                )
+                energy_difference = (
+                    candidate_energies.unsqueeze(-1)
+                    - candidate_energies.unsqueeze(-2)
+                )
+                better_pair = recovery_difference.gt(0)
+                recovery_pairwise_correct += int(
+                    energy_difference[better_pair].lt(0).sum()
+                )
+                recovery_pairwise_total += int(better_pair.sum())
             else:
                 loss = binary_loss
             if optimizer is not None:
@@ -259,6 +375,22 @@ def run_epoch(
             ranking_pairwise_accuracy=(
                 pairwise_correct / pairwise_total
                 if pairwise_total
+                else 0.0
+            ),
+        )
+    if recovery_ranking_weight:
+        metrics.update(
+            recovery_top1_accuracy=(
+                recovery_ranking_correct / denominator
+            ),
+            recovery_regret=recovery_regret_total / denominator,
+            recovery_score_spread=(
+                recovery_spread_total / denominator
+            ),
+            recovery_pair_count=recovery_pairwise_total,
+            recovery_pairwise_accuracy=(
+                recovery_pairwise_correct / recovery_pairwise_total
+                if recovery_pairwise_total
                 else 0.0
             ),
         )
@@ -351,6 +483,24 @@ def main() -> None:
     args = parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("MDLM energy training requires a Linux/CUDA environment.")
+    if args.on_policy_rollout_steps < 0:
+        raise ValueError("--on-policy-rollout-steps must be non-negative.")
+    if args.on_policy_rollout_steps >= args.on_policy_max_steps:
+        raise ValueError(
+            "--on-policy-rollout-steps must be smaller than "
+            "--on-policy-max-steps."
+        )
+    if args.recovery_ranking_weight < 0:
+        raise ValueError("--recovery-ranking-weight must be non-negative.")
+    if args.objective == "ranking" and args.recovery_ranking_weight:
+        raise ValueError(
+            "GPT-2 ranking and recovery ranking cannot be enabled together."
+        )
+    if args.seed is None:
+        args.seed = secrets.randbelow(2**31)
+    print(json.dumps({"resolved_seed": args.seed}))
+    random.seed(args.seed)
+    np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     device = torch.device("cuda")
@@ -442,6 +592,12 @@ def main() -> None:
             "teacher_temperature": args.teacher_temperature,
             "ranking_energy_temperature": args.ranking_energy_temperature,
             "binary_loss_weight": args.binary_loss_weight,
+            "on_policy_rollout_steps": args.on_policy_rollout_steps,
+            "on_policy_max_steps": args.on_policy_max_steps,
+            "recovery_ranking_weight": args.recovery_ranking_weight,
+            "recovery_ranking_temperature": (
+                args.recovery_ranking_temperature
+            ),
         }
         train_metrics = run_epoch(
             generator,
@@ -480,6 +636,7 @@ def main() -> None:
                     "mdlm_checkpoint": args.checkpoint,
                     "tokenizer": args.tokenizer,
                     "max_length": args.max_length,
+                    "seed": args.seed,
                     "energy_unfreeze_last_layers": (
                         args.energy_unfreeze_last_layers
                     ),
@@ -496,6 +653,16 @@ def main() -> None:
                         args.ranking_loss
                         if args.objective == "ranking"
                         else None
+                    ),
+                    "on_policy_rollout_steps": (
+                        args.on_policy_rollout_steps
+                    ),
+                    "on_policy_max_steps": args.on_policy_max_steps,
+                    "recovery_ranking_weight": (
+                        args.recovery_ranking_weight
+                    ),
+                    "recovery_ranking_temperature": (
+                        args.recovery_ranking_temperature
                     ),
                 },
             )

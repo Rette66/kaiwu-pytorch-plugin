@@ -147,6 +147,17 @@ class TestQDiffusionDummy(unittest.TestCase):
         self.assertEqual(outputs["weight"].shape, (2, 1))
         self.assertEqual(outputs["energy_objective"].shape, (2, 1))
 
+    def test_on_policy_objective_uses_proposal_only_rollout(self):
+        outputs = self.model.objective(
+            {"targets": self.targets},
+            rollout_steps=1,
+            rollout_max_steps=4,
+        )
+
+        self.assertEqual(self.energy_model.num_score_calls, 2)
+        self.assertTrue(outputs["loss_mask"].any(dim=-1).all())
+        self.assertEqual(outputs["candidate_tokens"].shape, (2, 2, 5))
+
     def test_binary_energy_objective_scores_each_negative_before_averaging(self):
         positive = torch.tensor([[0.25]])
         negatives = torch.tensor([[-3.0, 3.0]])

@@ -26,13 +26,21 @@ try:
     from .checkpoint import read_energy_checkpoint, load_energy_weights
     from .eval_gen_ppl import load_texts
     from .models import MDLMBackbone
-    from .train_energy import build_loader, candidate_teacher_nll
+    from .train_energy import (
+        build_loader,
+        candidate_recovery_scores,
+        candidate_teacher_nll,
+    )
 except ImportError:  # pragma: no cover - direct script execution
     from builder import build_mdlm_qdiffusion
     from checkpoint import read_energy_checkpoint, load_energy_weights
     from eval_gen_ppl import load_texts
     from models import MDLMBackbone
-    from train_energy import build_loader, candidate_teacher_nll
+    from train_energy import (
+        build_loader,
+        candidate_recovery_scores,
+        candidate_teacher_nll,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,6 +56,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-length", type=int, default=64)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--num-candidates", type=int, default=4)
+    parser.add_argument("--on-policy-rollout-steps", type=int, default=0)
+    parser.add_argument("--on-policy-max-steps", type=int, default=64)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
@@ -61,6 +71,9 @@ def evaluate_ranking(
     generator,
     loader,
     teacher_model,
+    *,
+    on_policy_rollout_steps: int = 0,
+    on_policy_max_steps: int = 64,
 ) -> dict[str, float | int]:
     """Compares BM ordering with causal-LM candidate NLL ordering."""
 
@@ -78,16 +91,26 @@ def evaluate_ranking(
     spearman_total = 0.0
     positive_energy_total = 0.0
     negative_energy_total = 0.0
+    recovery_top1_correct = 0
+    recovery_pairwise_correct = 0
+    recovery_pairwise_total = 0
+    recovery_regret_total = 0.0
+    recovery_spread_total = 0.0
 
     with torch.no_grad():
         for batch in loader:
-            outputs = generator.objective(batch)
+            outputs = generator.objective(
+                batch,
+                rollout_steps=on_policy_rollout_steps,
+                rollout_max_steps=on_policy_max_steps,
+            )
             energies = outputs["candidate_energies"]
             teacher_nll = candidate_teacher_nll(
                 outputs["candidate_tokens"],
                 teacher_model,
                 eos_token_id=generator.eos_id,
             )
+            recovery_scores = candidate_recovery_scores(outputs)
             batch_size, num_candidates = teacher_nll.shape
             energy_best = energies.argmin(dim=-1)
             teacher_best = teacher_nll.argmin(dim=-1)
@@ -161,6 +184,30 @@ def evaluate_ranking(
                 (regret / spread.clamp_min(1e-8)).sum()
             )
             spearman_total += float(rank_correlation.sum())
+            selected_recovery = recovery_scores.gather(
+                dim=-1,
+                index=energy_best.unsqueeze(-1),
+            ).squeeze(-1)
+            best_recovery = recovery_scores.max(dim=-1).values
+            worst_recovery = recovery_scores.min(dim=-1).values
+            recovery_top1_correct += int(
+                selected_recovery.eq(best_recovery).sum()
+            )
+            recovery_regret_total += float(
+                (best_recovery - selected_recovery).sum()
+            )
+            recovery_spread_total += float(
+                (best_recovery - worst_recovery).sum()
+            )
+            recovery_difference = (
+                recovery_scores.unsqueeze(-1)
+                - recovery_scores.unsqueeze(-2)
+            )
+            recovery_better_pair = recovery_difference.gt(0)
+            recovery_pairwise_correct += int(
+                energy_difference[recovery_better_pair].lt(0).sum()
+            )
+            recovery_pairwise_total += int(recovery_better_pair.sum())
             positive_energy_total += (
                 float(outputs["positive_energy_mean"]) * batch_size
             )
@@ -193,6 +240,18 @@ def evaluate_ranking(
         "energy_margin": (
             negative_energy_total - positive_energy_total
         ) / denominator,
+        "recovery_top1_accuracy": (
+            recovery_top1_correct / denominator
+        ),
+        "recovery_pairwise_accuracy": (
+            recovery_pairwise_correct / recovery_pairwise_total
+            if recovery_pairwise_total
+            else 0.0
+        ),
+        "recovery_regret": recovery_regret_total / denominator,
+        "recovery_score_spread": (
+            recovery_spread_total / denominator
+        ),
     }
 
 
@@ -286,12 +345,20 @@ def main() -> None:
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
-    metrics = evaluate_ranking(generator, loader, teacher_model)
+    metrics = evaluate_ranking(
+        generator,
+        loader,
+        teacher_model,
+        on_policy_rollout_steps=args.on_policy_rollout_steps,
+        on_policy_max_steps=args.on_policy_max_steps,
+    )
     result = {
         "energy_checkpoint": str(args.energy_checkpoint),
         "input": str(args.input),
         "offset": args.offset,
         "seed": args.seed,
+        "on_policy_rollout_steps": args.on_policy_rollout_steps,
+        "on_policy_max_steps": args.on_policy_max_steps,
         **metrics,
     }
     serialized = json.dumps(result, indent=2)

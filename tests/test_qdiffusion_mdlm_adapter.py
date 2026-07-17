@@ -14,7 +14,11 @@ from example.qdiffusion.nlp.evaluation import (
 from example.qdiffusion.nlp.eval_text_quality import compute_text_quality
 from example.qdiffusion.nlp import eval_energy_ranking
 from example.qdiffusion.nlp.smoke_generate import load_prompts
-from example.qdiffusion.nlp.train_energy import candidate_teacher_nll
+from example.qdiffusion.nlp.train_energy import (
+    candidate_recovery_scores,
+    candidate_teacher_nll,
+    recovery_ranking_objective,
+)
 from example.qdiffusion.nlp.builder import build_mdlm_qdiffusion
 from example.qdiffusion.nlp.checkpoint import (
     load_energy_weights,
@@ -419,6 +423,36 @@ def test_candidate_teacher_nll_returns_one_score_per_candidate():
     assert torch.allclose(nll, torch.full_like(nll, torch.log(torch.tensor(4.0))))
 
 
+def test_recovery_ranking_prefers_candidates_matching_masked_targets():
+    outputs = {
+        "targets": torch.tensor([[1, 2, 3, 4]]),
+        "loss_mask": torch.tensor([[False, True, True, False]]),
+        "candidate_tokens": torch.tensor(
+            [[[1, 2, 3, 4], [1, 2, 0, 4], [1, 0, 0, 4]]]
+        ),
+    }
+
+    scores = candidate_recovery_scores(outputs)
+    aligned_energies = torch.tensor([[-2.0, 0.0, 2.0]])
+    reversed_energies = -aligned_energies
+
+    aligned_loss = recovery_ranking_objective(
+        aligned_energies,
+        scores,
+        target_temperature=0.1,
+        energy_temperature=1.0,
+    )
+    reversed_loss = recovery_ranking_objective(
+        reversed_energies,
+        scores,
+        target_temperature=0.1,
+        energy_temperature=1.0,
+    )
+
+    assert torch.allclose(scores, torch.tensor([[1.0, 0.5, 0.0]]))
+    assert aligned_loss < reversed_loss
+
+
 def test_energy_ranking_diagnostic_compares_candidate_orderings(monkeypatch):
     class FakeProposal:
         def eval(self):
@@ -432,10 +466,12 @@ def test_energy_ranking_diagnostic_compares_candidate_orderings(monkeypatch):
         def eval(self):
             return self
 
-        def objective(self, batch):
-            del batch
+        def objective(self, batch, **kwargs):
+            del batch, kwargs
             return {
                 "candidate_tokens": torch.zeros(2, 3, 2, dtype=torch.long),
+                "targets": torch.zeros(2, 2, dtype=torch.long),
+                "loss_mask": torch.ones(2, 2, dtype=torch.bool),
                 "candidate_energies": torch.tensor(
                     [[0.0, 1.0, 2.0], [2.0, 1.0, 0.0]]
                 ),

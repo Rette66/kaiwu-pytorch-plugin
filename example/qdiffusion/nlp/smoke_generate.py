@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import secrets
 import sys
 from pathlib import Path
 
@@ -76,7 +77,11 @@ def parse_args() -> argparse.Namespace:
         help="Fraction of decode steps completed before BM guidance starts.",
     )
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        help="Random seed. A fresh recorded seed is generated when omitted.",
+    )
     return parser.parse_args()
 
 
@@ -147,6 +152,9 @@ def decode_responses(
 
 def main() -> None:
     args = parse_args()
+    if args.seed is None:
+        args.seed = secrets.randbelow(2**31)
+    print(json.dumps({"resolved_seed": args.seed}))
     if args.num_samples <= 0:
         raise ValueError("--num-samples must be positive.")
     batch_size = args.batch_size or args.num_samples
