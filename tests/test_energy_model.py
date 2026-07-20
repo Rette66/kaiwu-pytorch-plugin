@@ -25,6 +25,7 @@ class TestEnergyModel(unittest.TestCase):
             bm_num_hidden=2,
             sampler=DummySampler(num_solutions=2),
         )
+        model.energy_bm.to(torch.device("cpu"))
         visible_logits = torch.tensor([[2.0, -2.0], [-2.0, 2.0]])
 
         energy = model.score_visible_logits(visible_logits)
@@ -42,6 +43,7 @@ class TestEnergyModel(unittest.TestCase):
             bm_num_hidden=2,
             sampler=DummySampler(num_solutions=3),
         )
+        model.energy_bm.to(torch.device("cpu"))
         visible_logits = torch.tensor([[2.0, -2.0], [-2.0, 2.0]])
 
         energy = model.score_visible_logits(visible_logits)
