@@ -49,6 +49,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--importance-end-t", type=float, default=0.0)
     parser.add_argument("--energy-temperature", type=float, default=1.0)
     parser.add_argument(
+        "--energy-weights",
+        choices=("ema", "raw"),
+        default="ema",
+        help="Select EMA paper weights or raw weights for short-run diagnostics.",
+    )
+    parser.add_argument(
         "--allow-bm-ablation",
         action="store_true",
         help="Allow a BM checkpoint in the post-EDLM head ablation.",
@@ -107,7 +113,11 @@ def _load_energy(
         dtype=torch.float32,
         device=device,
     )
-    load_energy_weights(generator, checkpoint)
+    load_energy_weights(
+        generator,
+        checkpoint,
+        use_ema=args.energy_weights == "ema",
+    )
     generator.energy_model.eval()
     return generator.energy_model
 
@@ -181,6 +191,11 @@ def main() -> None:
                     "token_ids": row,
                     "seed": args.seed,
                     "sampler": "ddpm_cache",
+                    "energy_weights": (
+                        args.energy_weights
+                        if args.energy_checkpoint is not None
+                        else None
+                    ),
                     "steps": args.steps,
                     "num_candidates": (
                         args.num_candidates if energy_model is not None else 1

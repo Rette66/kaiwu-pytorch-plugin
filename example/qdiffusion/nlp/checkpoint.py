@@ -62,8 +62,19 @@ def read_energy_checkpoint(
     return checkpoint
 
 
-def load_energy_weights(generator, checkpoint: dict[str, Any]) -> None:
-    """Restores scalar or BM energy parameters."""
+def load_energy_weights(
+    generator,
+    checkpoint: dict[str, Any],
+    *,
+    use_ema: bool = True,
+) -> None:
+    """Restores scalar or BM energy parameters.
+
+    Args:
+        generator: QDiffusion generator that owns the target energy model.
+        checkpoint: Payload returned by :func:`read_energy_checkpoint`.
+        use_ema: Whether to apply EMA weights after restoring raw weights.
+    """
 
     energy_model = generator.energy_model
     if energy_model is None:
@@ -82,7 +93,7 @@ def load_energy_weights(generator, checkpoint: dict[str, Any]) -> None:
             state_dict["energy_encoder_trainable"],
             strict=False,
         )
-    if checkpoint.get("ema_state_dict"):
+    if use_ema and checkpoint.get("ema_state_dict"):
         energy_model.load_state_dict(
             checkpoint["ema_state_dict"],
             strict=False,

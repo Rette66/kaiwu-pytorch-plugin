@@ -56,6 +56,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-length", type=int, default=64)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--num-candidates", type=int, default=4)
+    parser.add_argument(
+        "--energy-weights",
+        choices=("ema", "raw"),
+        default="ema",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
@@ -63,6 +68,23 @@ def parse_args() -> argparse.Namespace:
 
 def _rank(values: torch.Tensor) -> torch.Tensor:
     return values.argsort(dim=-1).argsort(dim=-1).float()
+
+
+def checkpoint_has_trained_energy_encoder(
+    checkpoint: dict[str, object],
+) -> bool:
+    """Returns whether ranking needs a backbone separate from the proposal."""
+
+    state_dict = checkpoint.get("state_dict", {})
+    if isinstance(state_dict, dict) and state_dict.get(
+        "energy_encoder_trainable"
+    ):
+        return True
+    metadata = checkpoint.get("metadata", {})
+    return bool(
+        isinstance(metadata, dict)
+        and int(metadata.get("energy_unfreeze_last_layers", 0))
+    )
 
 
 def evaluate_ranking(
@@ -274,11 +296,8 @@ def main() -> None:
         .to(device)
         .eval()
     )
-    energy_unfreeze_last_layers = int(
-        metadata.get("energy_unfreeze_last_layers", 0)
-    )
     energy_backbone = None
-    if energy_unfreeze_last_layers:
+    if checkpoint_has_trained_energy_encoder(checkpoint):
         energy_backbone = (
             MDLMBackbone.from_pretrained(
                 args.checkpoint,
@@ -288,7 +307,6 @@ def main() -> None:
             .to(device)
             .eval()
         )
-        energy_backbone.train_last_blocks(energy_unfreeze_last_layers)
 
     generator = build_mdlm_qdiffusion(
         backbone,
@@ -306,7 +324,11 @@ def main() -> None:
         dtype=torch.float32,
         device=device,
     )
-    load_energy_weights(generator, checkpoint)
+    load_energy_weights(
+        generator,
+        checkpoint,
+        use_ema=args.energy_weights == "ema",
+    )
 
     from transformers import AutoModelForCausalLM
 
@@ -348,6 +370,7 @@ def main() -> None:
         "input": str(args.input),
         "offset": args.offset,
         "seed": args.seed,
+        "energy_weights": args.energy_weights,
         **metrics,
     }
     serialized = json.dumps(result, indent=2)

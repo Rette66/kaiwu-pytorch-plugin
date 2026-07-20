@@ -15,6 +15,7 @@ NUM_CANDIDATES="${NUM_CANDIDATES:-2}"
 IMPORTANCE_START_T="${IMPORTANCE_START_T:-1.0}"
 IMPORTANCE_END_T="${IMPORTANCE_END_T:-0.0}"
 ENERGY_TEMPERATURE="${ENERGY_TEMPERATURE:-1.0}"
+ENERGY_WEIGHTS="${ENERGY_WEIGHTS:-ema}"
 
 case "${PROFILE}" in
   smoke)
@@ -68,6 +69,7 @@ printf '%s\n' \
   "importance_start_t=${IMPORTANCE_START_T}" \
   "importance_end_t=${IMPORTANCE_END_T}" \
   "energy_temperature=${ENERGY_TEMPERATURE}" \
+  "energy_weights=${ENERGY_WEIGHTS}" \
   > "${OUTPUT_DIR}/config.txt"
 
 log_stage() {
@@ -99,6 +101,7 @@ generate_head() {
     --importance-start-t "${IMPORTANCE_START_T}" \
     --importance-end-t "${IMPORTANCE_END_T}" \
     --energy-temperature "${ENERGY_TEMPERATURE}" \
+    --energy-weights "${ENERGY_WEIGHTS}" \
     --seed "${SEED}" \
     --output "${output}" \
     "${extra_args[@]}" \

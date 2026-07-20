@@ -699,12 +699,22 @@ def test_scalar_energy_checkpoint_round_trip(tmp_path):
     )
     checkpoint_path = tmp_path / "scalar_energy.pt"
     original_weight = scalar.energy_model.energy_head[2].weight.detach().clone()
+    ema_state = {
+        name: torch.zeros_like(value)
+        for name, value in scalar.energy_model.state_dict().items()
+    }
 
-    save_energy_checkpoint(scalar, checkpoint_path, epoch=1, metric=0.5)
+    save_energy_checkpoint(
+        scalar,
+        checkpoint_path,
+        epoch=1,
+        metric=0.5,
+        ema_state_dict=ema_state,
+    )
     checkpoint = read_energy_checkpoint(checkpoint_path)
     with torch.no_grad():
         scalar.energy_model.energy_head[2].weight.zero_()
-    load_energy_weights(scalar, checkpoint)
+    load_energy_weights(scalar, checkpoint, use_ema=False)
 
     assert checkpoint["metadata"]["energy_type"] == "scalar"
     assert checkpoint["metadata"]["feature_mode"] == "edlm_pair"
@@ -712,6 +722,10 @@ def test_scalar_energy_checkpoint_round_trip(tmp_path):
         scalar.energy_model.energy_head[2].weight,
         original_weight,
     )
+    load_energy_weights(scalar, checkpoint)
+    assert torch.count_nonzero(
+        scalar.energy_model.energy_head[2].weight
+    ).item() == 0
 
 
 def test_builder_exposes_proposal_resampling_controls():
@@ -973,3 +987,16 @@ def test_energy_ranking_diagnostic_compares_candidate_orderings(monkeypatch):
     assert metrics["oracle_teacher_nll"] == 0.0
     assert metrics["candidate_mean_teacher_nll"] == 1.0
     assert metrics["energy_margin"] == 2.0
+
+
+def test_ranking_uses_separate_backbone_for_trained_energy_encoder():
+    checkpoint = {
+        "metadata": {"energy_unfreeze_last_layers": 0},
+        "state_dict": {
+            "energy_encoder_trainable": {
+                "model.layer.weight": torch.ones(1),
+            }
+        },
+    }
+
+    assert eval_energy_ranking.checkpoint_has_trained_energy_encoder(checkpoint)
