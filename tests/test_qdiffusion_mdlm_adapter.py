@@ -10,6 +10,7 @@ from torch import nn
 from example.qdiffusion.nlp.evaluation import (
     causal_lm_nll,
     compute_generative_perplexity,
+    compute_token_id_perplexity,
 )
 from example.qdiffusion.nlp.eval_text_quality import (
     compute_mean_token_entropy,
@@ -304,6 +305,19 @@ def test_edlm_token_entropy_matches_reference_definition():
     )
 
     assert entropy == pytest.approx(0.5)
+
+
+def test_token_id_perplexity_uses_first_eos_and_non_eos_targets():
+    model = FakeCausalLM()
+    result = compute_token_id_perplexity(
+        [[1, 2, 2, 3]],
+        model,
+        eos_token_id=2,
+        batch_size=1,
+    )
+
+    assert result.num_tokens == 2
+    assert result.perplexity == pytest.approx(4.0)
 
 
 def test_mdlm_adapter_exposes_hidden_states_and_token_spec():

@@ -122,3 +122,78 @@ def compute_generative_perplexity(
         num_tokens=total_tokens,
         num_sequences=len(texts),
     )
+
+
+@torch.inference_mode()
+def compute_token_id_perplexity(
+    token_id_sequences: Iterable[list[int]],
+    evaluator_model: torch.nn.Module,
+    *,
+    eos_token_id: int,
+    batch_size: int = 8,
+    device: torch.device | str | None = None,
+) -> GenerativePerplexityResult:
+    """Scores raw GPT-2 token IDs with the EDLM reference EOS mask."""
+
+    sequences = list(token_id_sequences)
+    if not sequences or any(not sequence for sequence in sequences):
+        raise ValueError("At least one non-empty token sequence is required.")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+    if device is None:
+        try:
+            device = next(evaluator_model.parameters()).device
+        except StopIteration:
+            device = torch.device("cpu")
+    device = torch.device(device)
+    total_nll = 0.0
+    total_tokens = 0
+
+    evaluator_model.eval()
+    for start in range(0, len(sequences), batch_size):
+        chunk = sequences[start : start + batch_size]
+        max_length = max(map(len, chunk))
+        input_ids = torch.full(
+            (len(chunk), max_length),
+            eos_token_id,
+            dtype=torch.long,
+            device=device,
+        )
+        sequence_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+        for row, sequence in enumerate(chunk):
+            length = len(sequence)
+            input_ids[row, :length] = torch.tensor(
+                sequence,
+                dtype=torch.long,
+                device=device,
+            )
+            sequence_mask[row, :length] = True
+
+        outputs = evaluator_model(
+            input_ids=input_ids,
+            attention_mask=sequence_mask,
+            return_dict=True,
+        )
+        shifted_logits = _extract_logits(outputs)[:, :-1].float()
+        shifted_targets = input_ids[:, 1:]
+        first_eos = input_ids.eq(eos_token_id).cumsum(dim=-1).eq(1)
+        valid_tokens = sequence_mask[:, 1:] & (
+            shifted_targets.ne(eos_token_id) | first_eos[:, 1:]
+        )
+        token_nll = (
+            -torch.log_softmax(shifted_logits, dim=-1)
+            .gather(-1, shifted_targets.unsqueeze(-1))
+            .squeeze(-1)
+        )
+        total_nll += float(token_nll.masked_select(valid_tokens).sum())
+        total_tokens += int(valid_tokens.sum())
+
+    if total_tokens == 0:
+        raise ValueError("Token sequences contain no next-token targets to score.")
+    mean_nll = total_nll / total_tokens
+    return GenerativePerplexityResult(
+        perplexity=math.exp(mean_nll),
+        mean_nll=mean_nll,
+        num_tokens=total_tokens,
+        num_sequences=len(sequences),
+    )

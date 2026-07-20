@@ -216,12 +216,19 @@ def decode_responses(
     tokens: torch.Tensor,
     tokenizer,
     prompt_length: int,
+    *,
+    truncate_at_eos: bool = True,
 ) -> list[str]:
     responses = []
     for row in tokens[:, prompt_length:].tolist():
-        if tokenizer.eos_token_id in row:
+        if truncate_at_eos and tokenizer.eos_token_id in row:
             row = row[: row.index(tokenizer.eos_token_id)]
-        responses.append(tokenizer.decode(row, skip_special_tokens=True).strip())
+        responses.append(
+            tokenizer.decode(
+                row,
+                skip_special_tokens=truncate_at_eos,
+            ).strip()
+        )
     return responses
 
 
@@ -391,7 +398,12 @@ def main() -> None:
                     num_steps=args.steps,
                 )
             prompt_responses.extend(
-                decode_responses(output, backbone.tokenizer, prompt_length)
+                decode_responses(
+                    output,
+                    backbone.tokenizer,
+                    prompt_length,
+                    truncate_at_eos=not args.unconditional,
+                )
             )
             prompt_token_ids.extend(
                 output[:, prompt_length:].detach().cpu().tolist()

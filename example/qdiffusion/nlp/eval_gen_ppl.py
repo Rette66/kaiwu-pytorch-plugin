@@ -9,15 +9,22 @@ from pathlib import Path
 import torch
 
 try:
-    from .evaluation import compute_generative_perplexity
+    from .evaluation import (
+        compute_generative_perplexity,
+        compute_token_id_perplexity,
+    )
 except ImportError:  # pragma: no cover - direct script execution
-    from evaluation import compute_generative_perplexity
+    from evaluation import compute_generative_perplexity, compute_token_id_perplexity
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--text-field", default="text")
+    parser.add_argument(
+        "--token-ids-field",
+        help="Score raw token IDs with the EDLM EOS mask instead of decoded text.",
+    )
     parser.add_argument("--evaluator", default="gpt2-large")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--max-length", type=int, default=1024)
@@ -49,6 +56,28 @@ def load_texts(path: Path, text_field: str) -> list[str]:
     return texts
 
 
+def load_token_id_sequences(path: Path, field: str) -> list[list[int]]:
+    """Loads raw token sequences from JSONL generation records."""
+
+    sequences = []
+    for line_number, raw_line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        if not raw_line.strip():
+            continue
+        record = json.loads(raw_line)
+        value = record.get(field)
+        if not isinstance(value, list) or not all(
+            isinstance(token_id, int) for token_id in value
+        ):
+            raise TypeError(
+                f"Field {field!r} on line {line_number} must contain integer IDs."
+            )
+        sequences.append(value)
+    return sequences
+
+
 def main() -> None:
     args = parse_args()
     if not torch.cuda.is_available():
@@ -63,14 +92,23 @@ def main() -> None:
         args.evaluator,
         torch_dtype=torch.bfloat16,
     ).to("cuda")
-    result = compute_generative_perplexity(
-        load_texts(args.input, args.text_field),
-        model,
-        tokenizer,
-        batch_size=args.batch_size,
-        max_length=args.max_length,
-        device="cuda",
-    )
+    if args.token_ids_field:
+        result = compute_token_id_perplexity(
+            load_token_id_sequences(args.input, args.token_ids_field),
+            model,
+            eos_token_id=tokenizer.eos_token_id,
+            batch_size=args.batch_size,
+            device="cuda",
+        )
+    else:
+        result = compute_generative_perplexity(
+            load_texts(args.input, args.text_field),
+            model,
+            tokenizer,
+            batch_size=args.batch_size,
+            max_length=args.max_length,
+            device="cuda",
+        )
     print(json.dumps(result.__dict__, indent=2, ensure_ascii=False))
 
 

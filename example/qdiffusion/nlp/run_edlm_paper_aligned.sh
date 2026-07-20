@@ -66,6 +66,7 @@ evaluate() {
     > "${OUTPUT_DIR}/${name}.quality.json"
   "${PY}" -m example.qdiffusion.nlp.eval_gen_ppl \
     --input "${OUTPUT_DIR}/${name}.jsonl" \
+    --token-ids-field token_ids \
     --evaluator gpt2 \
     --batch-size 4 \
     > "${OUTPUT_DIR}/${name}.ppl.json"
