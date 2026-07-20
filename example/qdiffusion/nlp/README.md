@@ -77,3 +77,32 @@ The paper's efficient setting is the early reverse-process window
 
 The BM/Projector route will be reintroduced only after this scalar baseline is
 reproduced and frozen as a controlled reference.
+
+## Stage 3: energy-head-only ablation
+
+`run_edlm_head_ablation.sh` launches scalar and BM training sequentially with
+the same explicit seed, wrapped token blocks, data order, continuous
+timesteps, corruption masks, proposal negatives, optimizer, EMA, and training
+budget. The trainer resets its post-construction random stream so the
+different head initializers cannot perturb the paired candidate stream.
+
+The only active architecture switch is:
+
+- `scalar`: `Linear(d,d) -> ReLU -> Linear(d,1)`;
+- `bm`: `Linear(d,V=64) -> identity visible transform -> BM(V=64,H=32)`
+  with SA-conditioned hidden states.
+
+The SA state is treated as a sampled latent assignment; gradients still flow
+through the continuous visible values, Projector, shared EDLM encoder, and BM
+parameters. Exact hidden enumeration is not used.
+
+Validate both paths with one optimizer step:
+
+```bash
+PROFILE=smoke \
+ROOT=/path/to/isolated/checkout \
+bash example/qdiffusion/nlp/run_edlm_head_ablation.sh
+```
+
+The script records separate logs, checkpoints, and five-second GPU-memory
+traces for the scalar and BM runs.

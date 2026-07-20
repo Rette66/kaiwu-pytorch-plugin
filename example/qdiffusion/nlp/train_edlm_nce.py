@@ -1,4 +1,4 @@
-"""Train the paper-aligned EDLM-NCE scalar energy on wrapped GPT-2 blocks."""
+"""Train EDLM-NCE scalar or BM energy on identical wrapped GPT-2 blocks."""
 
 from __future__ import annotations
 
@@ -35,7 +35,11 @@ _bootstrap_repo()
 
 from .checkpoint import save_energy_checkpoint  # noqa: E402
 from .eval_gen_ppl import load_texts  # noqa: E402
-from .models import MDLMBackbone, MDLMScalarEnergyModel  # noqa: E402
+from .models import (  # noqa: E402
+    MDLMBackbone,
+    MDLMConditionedEnergyModel,
+    MDLMScalarEnergyModel,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,6 +59,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ema-decay", type=float, default=0.9999)
     parser.add_argument("--sampling-eps", type=float, default=1e-3)
     parser.add_argument("--noise-eps", type=float, default=1e-3)
+    parser.add_argument(
+        "--energy-type",
+        choices=("scalar", "bm"),
+        default="scalar",
+    )
+    parser.add_argument("--bm-num-visible", type=int, default=64)
+    parser.add_argument("--bm-num-hidden", type=int, default=32)
+    parser.add_argument(
+        "--bm-visible-transform",
+        choices=("identity", "sigmoid", "layernorm"),
+        default="identity",
+    )
+    parser.add_argument("--bm-sa-alpha", type=float, default=0.95)
+    parser.add_argument("--bm-sa-size-limit", type=int, default=10)
     parser.add_argument("--seed", type=int)
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--save-every", type=int, default=1000)
@@ -185,7 +203,7 @@ class EMATracker:
 
 def train_step(
     proposal: MDLMBackbone,
-    energy_model: MDLMScalarEnergyModel,
+    energy_model: torch.nn.Module,
     clean_tokens: torch.Tensor,
     *,
     sampling_eps: float,
@@ -231,7 +249,7 @@ def train_step(
 
 
 def _save(
-    energy_model: MDLMScalarEnergyModel,
+    energy_model: torch.nn.Module,
     ema: EMATracker,
     path: Path,
     *,
@@ -261,6 +279,14 @@ def main() -> None:
         )
     if args.max_steps <= 0:
         raise ValueError("--max-steps must be positive.")
+    if args.log_every <= 0 or args.save_every <= 0:
+        raise ValueError("--log-every and --save-every must be positive.")
+    if args.bm_num_visible <= 0 or args.bm_num_hidden <= 0:
+        raise ValueError("BM visible and hidden sizes must be positive.")
+    if not 0.0 < args.bm_sa_alpha < 1.0:
+        raise ValueError("--bm-sa-alpha must be in (0, 1).")
+    if args.bm_sa_size_limit <= 0:
+        raise ValueError("--bm-sa-size-limit must be positive.")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -289,12 +315,19 @@ def main() -> None:
     )
     if not blocks:
         raise ValueError("The input produced no complete token blocks.")
+    loader_generator = torch.Generator()
+    loader_generator.manual_seed(args.seed + 1)
     loader = DataLoader(
         blocks,
         batch_size=args.micro_batch_size,
         shuffle=True,
         drop_last=True,
+        generator=loader_generator,
     )
+    if len(loader) == 0:
+        raise ValueError(
+            "The token-block dataset is smaller than --micro-batch-size."
+        )
 
     energy_backbone = (
         MDLMBackbone.from_pretrained(
@@ -305,7 +338,27 @@ def main() -> None:
         .to(device)
         .train()
     )
-    energy_model = MDLMScalarEnergyModel(energy_backbone).to(device).train()
+    if args.energy_type == "scalar":
+        energy_model = MDLMScalarEnergyModel(energy_backbone)
+    else:
+        energy_model = MDLMConditionedEnergyModel(
+            energy_backbone,
+            bm_num_visible=args.bm_num_visible,
+            bm_num_hidden=args.bm_num_hidden,
+            sampler_type="sa",
+            sampler_kwargs={
+                "alpha": args.bm_sa_alpha,
+                "size_limit": args.bm_sa_size_limit,
+                "rand_seed": args.seed + 3,
+            },
+            scoring_mode="sampler",
+            visible_transform=args.bm_visible_transform,
+            feature_mode="edlm_pair",
+        )
+    energy_model = energy_model.to(device).train()
+    if isinstance(energy_model, MDLMConditionedEnergyModel):
+        energy_model.energy_bm.device = device
+        energy_model.energy_bm.dtype = torch.float32
     trainable = [
         parameter
         for parameter in energy_model.parameters()
@@ -323,7 +376,7 @@ def main() -> None:
             "97e3146964f76aaa784fe523c673516efc7af0e0"
         ),
         "mdlm_checkpoint": args.checkpoint,
-        "energy_type": "scalar",
+        "energy_type": args.energy_type,
         "feature_mode": "edlm_pair",
         "training_objective": "binary_nce",
         "num_proposal_negatives": 1,
@@ -340,7 +393,11 @@ def main() -> None:
         "num_records": len(texts),
         "num_blocks": len(blocks),
         "energy_train_scope": "all",
+        "data_order_seed": args.seed + 1,
+        "training_rng_seed": args.seed + 2,
     }
+    if isinstance(energy_model, MDLMConditionedEnergyModel):
+        metadata.update(energy_model.checkpoint_metadata())
     args.output.parent.mkdir(parents=True, exist_ok=True)
     config_path = args.output.with_suffix(args.output.suffix + ".config.json")
     config_path.write_text(
@@ -349,6 +406,13 @@ def main() -> None:
     )
     print(json.dumps({"resolved_seed": args.seed, **metadata}))
 
+    # Head construction consumes a different number of random values for scalar
+    # and BM models. Reset the training stream so paired runs see identical
+    # timesteps, corruptions, proposal negatives, and data order.
+    random.seed(args.seed + 2)
+    np.random.seed(args.seed + 2)
+    torch.manual_seed(args.seed + 2)
+    torch.cuda.manual_seed_all(args.seed + 2)
     optimizer.zero_grad(set_to_none=True)
     data_iterator = iter(loader)
     optimizer_step = 0

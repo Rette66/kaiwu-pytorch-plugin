@@ -497,6 +497,33 @@ def test_bm_can_replace_only_the_edlm_scalar_head():
     assert energy_model.conditioned_encoder.input_projection.weight.grad is not None
 
 
+def test_sampler_bm_energy_keeps_straight_through_visible_gradients():
+    backbone = MDLMBackbone(EDLMFakeMDLM(), FakeTokenizer(), mask_id=5)
+    energy_model = MDLMConditionedEnergyModel(
+        backbone,
+        bm_num_visible=2,
+        bm_num_hidden=1,
+        sampler=FakeBMSampler(),
+        scoring_mode="sampler",
+        visible_transform="identity",
+        feature_mode="edlm_pair",
+    )
+    noisy_tokens = torch.tensor([[1, 5, 5]])
+    candidate_tokens = torch.tensor([[1, 3, 4]])
+
+    energy = energy_model.score_conditioned(
+        noisy_tokens,
+        candidate_tokens,
+        torch.ones_like(candidate_tokens, dtype=torch.bool),
+    )
+    energy.sum().backward()
+
+    assert energy_model.feature_projector.weight.grad is not None
+    assert energy_model.conditioned_encoder.input_projection.weight.grad is not None
+    assert energy_model.energy_bm.linear_bias.grad is not None
+    assert energy_model.energy_bm.quadratic_coef.grad is not None
+
+
 def test_mdlm_candidate_scoring_encodes_noisy_context_once():
     model = CountingFakeMDLM()
     backbone = MDLMBackbone(model, FakeTokenizer(), mask_id=5)
