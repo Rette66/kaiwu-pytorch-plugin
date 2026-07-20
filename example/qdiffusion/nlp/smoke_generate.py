@@ -24,10 +24,12 @@ _bootstrap_repo()
 try:
     from .builder import build_mdlm_qdiffusion
     from .checkpoint import load_energy_weights, read_energy_checkpoint
+    from .edlm_sampling import EDLMDDPMCacheSampler
     from .models import MDLMBackbone
 except ImportError:  # pragma: no cover - direct script execution
     from builder import build_mdlm_qdiffusion
     from checkpoint import load_energy_weights, read_energy_checkpoint
+    from edlm_sampling import EDLMDDPMCacheSampler
     from models import MDLMBackbone
 
 
@@ -43,6 +45,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--steps", type=int, default=64)
+    parser.add_argument(
+        "--sampling-method",
+        choices=("qdiffusion", "edlm-ddpm-cache"),
+        default="qdiffusion",
+        help="Generic QDiffusion decoding or paper-aligned EDLM DDPM caching.",
+    )
+    parser.add_argument(
+        "--unconditional",
+        action="store_true",
+        help="Start from a fully masked sequence, as in EDLM OWT evaluation.",
+    )
+    parser.add_argument(
+        "--sequence-length",
+        type=int,
+        default=1024,
+        help="Fully masked sequence length used with --unconditional.",
+    )
     parser.add_argument("--num-samples", type=int, default=1)
     parser.add_argument(
         "--batch-size",
@@ -81,6 +100,18 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="Fraction of decode steps after which energy guidance stops.",
+    )
+    parser.add_argument(
+        "--edlm-importance-start-t",
+        type=float,
+        default=1.0,
+        help="Upper diffusion timestep for EDLM importance sampling.",
+    )
+    parser.add_argument(
+        "--edlm-importance-end-t",
+        type=float,
+        default=0.0,
+        help="Lower diffusion timestep for EDLM importance sampling.",
     )
     parser.add_argument(
         "--enable-resample",
@@ -162,6 +193,25 @@ def build_prompt_canvas(
     return tokens, fixed_prompt, len(prefix)
 
 
+def build_unconditional_canvas(
+    backbone: MDLMBackbone,
+    sequence_length: int,
+    batch_size: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Builds the fully masked canvas used by EDLM OWT sample evaluation."""
+
+    if sequence_length <= 0:
+        raise ValueError("--sequence-length must be positive.")
+    tokens = torch.full(
+        (batch_size, sequence_length),
+        backbone.mask_id,
+        dtype=torch.long,
+        device=device,
+    )
+    return tokens, torch.zeros_like(tokens, dtype=torch.bool), 0
+
+
 def decode_responses(
     tokens: torch.Tensor,
     tokenizer,
@@ -189,6 +239,20 @@ def main() -> None:
         raise ValueError(
             "Energy guidance ratios must satisfy "
             "0 <= start <= end <= 1."
+        )
+    if not (
+        0.0
+        <= args.edlm_importance_end_t
+        <= args.edlm_importance_start_t
+        <= 1.0
+    ):
+        raise ValueError(
+            "EDLM importance window must satisfy "
+            "0 <= end_t <= start_t <= 1."
+        )
+    if args.unconditional and (args.prompt is not None or args.prompts_file):
+        raise ValueError(
+            "--unconditional cannot be combined with --prompt or --prompts-file."
         )
     if not 0.0 < args.resample_ratio <= 1.0:
         raise ValueError("--resample-ratio must be in (0, 1].")
@@ -272,35 +336,82 @@ def main() -> None:
     )
     if energy_checkpoint is not None:
         load_energy_weights(generator, energy_checkpoint)
+    edlm_sampler = None
+    if args.sampling_method == "edlm-ddpm-cache":
+        edlm_sampler = EDLMDDPMCacheSampler(
+            backbone,
+            mask_id=backbone.mask_id,
+            energy_model=generator.energy_model,
+            num_candidates=num_candidates,
+            energy_temperature=args.energy_temperature,
+            importance_start_t=args.edlm_importance_start_t,
+            importance_end_t=args.edlm_importance_end_t,
+        )
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
-    prompts = load_prompts(args.prompt, args.prompts_file)
+    prompts = [""] if args.unconditional else load_prompts(
+        args.prompt,
+        args.prompts_file,
+    )
     records = []
     for prompt_index, prompt in enumerate(prompts):
         prompt_responses = []
+        prompt_token_ids = []
         for batch_start in range(0, args.num_samples, batch_size):
             current_batch_size = min(
                 batch_size,
                 args.num_samples - batch_start,
             )
-            input_tokens, fixed_prompt, prompt_length = build_prompt_canvas(
-                backbone,
-                prompt,
-                args.max_new_tokens,
-                current_batch_size,
-                device,
-            )
-            output = generator.generate(
-                input_tokens,
-                max_steps=args.steps,
-                partial_masks=fixed_prompt,
-            )
+            if args.unconditional:
+                input_tokens, fixed_prompt, prompt_length = (
+                    build_unconditional_canvas(
+                        backbone,
+                        args.sequence_length,
+                        current_batch_size,
+                        device,
+                    )
+                )
+            else:
+                input_tokens, fixed_prompt, prompt_length = build_prompt_canvas(
+                    backbone,
+                    prompt,
+                    args.max_new_tokens,
+                    current_batch_size,
+                    device,
+                )
+            if edlm_sampler is None:
+                output = generator.generate(
+                    input_tokens,
+                    max_steps=args.steps,
+                    partial_masks=fixed_prompt,
+                )
+            else:
+                output = edlm_sampler.sample(
+                    input_tokens,
+                    num_steps=args.steps,
+                )
             prompt_responses.extend(
                 decode_responses(output, backbone.tokenizer, prompt_length)
             )
-        for sample_index, response in enumerate(prompt_responses):
+            prompt_token_ids.extend(
+                output[:, prompt_length:].detach().cpu().tolist()
+            )
+        for sample_index, (response, response_token_ids) in enumerate(
+            zip(prompt_responses, prompt_token_ids, strict=True)
+        ):
             print(f"prompt[{prompt_index}] sample[{sample_index}]: {response}")
-            records.append({"prompt": prompt, "text": response})
+            records.append(
+                {
+                    "prompt": prompt,
+                    "text": response,
+                    "token_ids": response_token_ids,
+                    "seed": args.seed,
+                    "sampling_method": args.sampling_method,
+                    "steps": args.steps,
+                }
+            )
+    if edlm_sampler is not None:
+        print(json.dumps({"edlm_sampling": edlm_sampler.last_stats}))
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         with args.output.open("w", encoding="utf-8") as output_file:

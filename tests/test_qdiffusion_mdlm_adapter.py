@@ -11,8 +11,12 @@ from example.qdiffusion.nlp.evaluation import (
     causal_lm_nll,
     compute_generative_perplexity,
 )
-from example.qdiffusion.nlp.eval_text_quality import compute_text_quality
+from example.qdiffusion.nlp.eval_text_quality import (
+    compute_mean_token_entropy,
+    compute_text_quality,
+)
 from example.qdiffusion.nlp import eval_energy_ranking
+from example.qdiffusion.nlp.edlm_sampling import EDLMDDPMCacheSampler
 from example.qdiffusion.nlp.smoke_generate import load_prompts, parse_args
 from example.qdiffusion.nlp.train_energy import (
     candidate_recovery_scores,
@@ -195,6 +199,56 @@ class RecordingMDLMEnergy(MDLMConditionedEnergyModel):
         return visible_logits.sum(dim=-1, keepdim=True)
 
 
+class FixedDDPMProposal(nn.Module):
+    def __init__(self, mask_id: int = 3, vocab_size: int = 4) -> None:
+        super().__init__()
+        self.mask_id = mask_id
+        self.vocab_size = vocab_size
+        self.calls = 0
+
+    def forward(self, tokens):
+        self.calls += 1
+        logits = torch.full(
+            (*tokens.shape, self.vocab_size),
+            -torch.inf,
+            device=tokens.device,
+        )
+        masked = tokens.eq(self.mask_id)
+        logits[..., 0] = torch.where(
+            masked,
+            torch.log(torch.tensor(0.75)),
+            logits[..., 0],
+        )
+        logits[..., 1] = torch.where(
+            masked,
+            torch.log(torch.tensor(0.25)),
+            logits[..., 1],
+        )
+        for token_id in range(self.mask_id):
+            logits[..., token_id] = torch.where(
+                tokens.eq(token_id),
+                torch.zeros_like(logits[..., token_id]),
+                logits[..., token_id],
+            )
+        return logits
+
+
+class CountingCandidateEnergy(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    def score_candidates_conditioned(
+        self,
+        noisy_tokens,
+        candidate_tokens,
+        attention_mask,
+    ):
+        del noisy_tokens, attention_mask
+        self.calls += 1
+        return candidate_tokens.float().sum(dim=-1)
+
+
 def test_mdlm_subs_parameterization_suppresses_mask_and_copies_clean_tokens():
     backbone = MDLMBackbone(FakeMDLM(), FakeTokenizer(), mask_id=5)
     input_ids = torch.tensor([[1, 5, 3]])
@@ -206,6 +260,50 @@ def test_mdlm_subs_parameterization_suppresses_mask_and_copies_clean_tokens():
     assert log_probs[0, 2, 3].item() == 0.0
     assert torch.isneginf(log_probs[0, 0, 0])
     assert torch.logsumexp(log_probs[0, 1, :5], dim=-1).item() == pytest.approx(0.0)
+
+
+def test_edlm_ddpm_cache_preserves_unmasked_tokens():
+    proposal = FixedDDPMProposal()
+    sampler = EDLMDDPMCacheSampler(
+        proposal,
+        mask_id=proposal.mask_id,
+    )
+    tokens = torch.tensor([[2, proposal.mask_id, proposal.mask_id]])
+    torch.manual_seed(4)
+
+    sampled = sampler.sample(tokens, num_steps=8)
+
+    assert sampled[0, 0].item() == 2
+    assert not sampled.eq(proposal.mask_id).any()
+    assert sampler.last_stats["proposal_forwards"] <= 8
+
+
+def test_edlm_importance_window_uses_early_reverse_steps():
+    proposal = FixedDDPMProposal()
+    energy = CountingCandidateEnergy()
+    sampler = EDLMDDPMCacheSampler(
+        proposal,
+        mask_id=proposal.mask_id,
+        energy_model=energy,
+        num_candidates=2,
+        importance_start_t=1.0,
+        importance_end_t=0.8,
+    )
+    tokens = torch.full((1, 8), proposal.mask_id)
+    torch.manual_seed(7)
+
+    sampler.sample(tokens, num_steps=4)
+
+    assert sampler.last_stats["guided_steps"] == 1
+    assert energy.calls == 1
+
+
+def test_edlm_token_entropy_matches_reference_definition():
+    entropy = compute_mean_token_entropy(
+        [[1, 1, 2, 2], [3, 3, 3, 3]]
+    )
+
+    assert entropy == pytest.approx(0.5)
 
 
 def test_mdlm_adapter_exposes_hidden_states_and_token_spec():

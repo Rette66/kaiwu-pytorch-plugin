@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import json
+import math
 from pathlib import Path
 import re
 
@@ -77,11 +78,51 @@ def compute_text_quality(texts: list[str]) -> dict[str, float | int]:
     return result
 
 
+def load_token_id_sequences(path: Path) -> list[list[int]] | None:
+    """Loads optional raw token IDs emitted by the generation entrypoint."""
+
+    sequences = []
+    with path.open(encoding="utf-8") as input_file:
+        for line in input_file:
+            if not line.strip():
+                continue
+            value = json.loads(line).get("token_ids")
+            if value is None:
+                return None
+            if not isinstance(value, list) or not all(
+                isinstance(token_id, int) for token_id in value
+            ):
+                raise ValueError("token_ids must be a list of integers.")
+            sequences.append(value)
+    return sequences
+
+
+def compute_mean_token_entropy(token_ids: list[list[int]]) -> float:
+    """Matches EDLM's mean per-sequence Shannon entropy in bits."""
+
+    if not token_ids or any(not sequence for sequence in token_ids):
+        raise ValueError("Token entropy requires non-empty token sequences.")
+    entropies = []
+    for sequence in token_ids:
+        counts = Counter(sequence)
+        total = len(sequence)
+        entropies.append(
+            -sum(
+                (count / total) * math.log2(count / total)
+                for count in counts.values()
+            )
+        )
+    return sum(entropies) / len(entropies)
+
+
 def main() -> None:
     args = parse_args()
     result = compute_text_quality(
         load_texts(args.input, args.text_field)
     )
+    token_ids = load_token_id_sequences(args.input)
+    if token_ids is not None:
+        result["token_entropy_bits"] = compute_mean_token_entropy(token_ids)
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
