@@ -18,9 +18,10 @@ The baseline uses:
 - unconditional OpenWebText generation at length 1024;
 - SUBS parameterization and log-linear masking;
 - `ddpm_cache` with 1024 reverse steps for the paper's Table 3;
+- the reference exponential-race categorical sampler;
 - final noise removal;
 - 128 generated samples for the resource-bounded reproduction profile;
-- GPT-2 Large generative perplexity over the generated GPT-2 token IDs.
+- FP32 GPT-2 Large generative perplexity over generated GPT-2 token IDs.
 
 The paper computes Gen PPL from 2048 generated sequences. The released
 single-process sampling script emits 128 sequences per GPU/process, so this

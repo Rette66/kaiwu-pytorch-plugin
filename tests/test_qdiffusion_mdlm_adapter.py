@@ -17,7 +17,10 @@ from example.qdiffusion.nlp.eval_text_quality import (
     compute_text_quality,
 )
 from example.qdiffusion.nlp import eval_energy_ranking
-from example.qdiffusion.nlp.edlm_sampling import EDLMDDPMCacheSampler
+from example.qdiffusion.nlp.edlm_sampling import (
+    EDLMDDPMCacheSampler,
+    _sample_categorical,
+)
 from example.qdiffusion.nlp.smoke_generate import load_prompts, parse_args
 from example.qdiffusion.nlp.train_energy import (
     candidate_recovery_scores,
@@ -297,6 +300,21 @@ def test_edlm_ddpm_cache_preserves_unmasked_tokens():
     assert sampled[0, 0].item() == 2
     assert not sampled.eq(proposal.mask_id).any()
     assert sampler.last_stats["proposal_forwards"] <= 8
+
+
+def test_edlm_exponential_race_sampler_preserves_candidate_axes():
+    weights = torch.tensor(
+        [
+            [[1.0, 0.0], [0.0, 1.0]],
+            [[0.0, 1.0], [1.0, 0.0]],
+        ]
+    )
+
+    samples = _sample_categorical(weights, num_samples=3)
+
+    assert samples.shape == (2, 3, 2)
+    assert torch.equal(samples[0], torch.tensor([[0, 1]]).expand(3, -1))
+    assert torch.equal(samples[1], torch.tensor([[1, 0]]).expand(3, -1))
 
 
 def test_edlm_importance_window_uses_early_reverse_steps():

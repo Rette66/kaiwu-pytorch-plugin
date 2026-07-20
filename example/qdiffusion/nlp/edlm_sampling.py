@@ -12,19 +12,23 @@ def _sample_categorical(
     *,
     num_samples: int = 1,
 ) -> torch.Tensor:
-    """Samples independent categorical tokens from unnormalized weights."""
+    """Samples with the EDLM reference exponential-race implementation."""
 
     if num_samples <= 0:
         raise ValueError("num_samples must be positive.")
-    flat_weights = weights.reshape(-1, weights.size(-1))
-    samples = torch.multinomial(
-        flat_weights.float(),
-        num_samples=num_samples,
-        replacement=True,
+    if weights.ndim != 3:
+        raise ValueError("weights must have shape (batch, sequence, vocab).")
+    batch_size, sequence_length, _ = weights.shape
+    repeated_weights = weights.repeat(num_samples, 1, 1)
+    exponential_noise = (
+        1e-10
+        - (torch.rand_like(repeated_weights) + 1e-10).log()
     )
     return (
-        samples.view(*weights.shape[:-1], num_samples)
-        .movedim(-1, -2)
+        (repeated_weights / exponential_noise)
+        .argmax(dim=-1)
+        .view(num_samples, batch_size, sequence_length)
+        .permute(1, 0, 2)
         .contiguous()
     )
 

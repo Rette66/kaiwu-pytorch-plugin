@@ -28,6 +28,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--evaluator", default="gpt2-large")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--max-length", type=int, default=1024)
+    parser.add_argument(
+        "--dtype",
+        choices=("float32", "bfloat16"),
+        default="float32",
+        help="The EDLM reference evaluates GPT-2 in float32.",
+    )
     return parser.parse_args()
 
 
@@ -90,7 +96,11 @@ def main() -> None:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(
         args.evaluator,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=(
+            torch.float32
+            if args.dtype == "float32"
+            else torch.bfloat16
+        ),
     ).to("cuda")
     if args.token_ids_field:
         result = compute_token_id_perplexity(
