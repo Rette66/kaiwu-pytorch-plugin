@@ -516,7 +516,8 @@ def test_sampler_bm_energy_keeps_straight_through_visible_gradients():
         scoring_mode="sampler",
         visible_transform="identity",
         feature_mode="edlm_pair",
-    ).to(torch.device("cpu"))
+    )
+    energy_model.energy_bm.to(torch.device("cpu"))
     noisy_tokens = torch.tensor([[1, 5, 5]])
     candidate_tokens = torch.tensor([[1, 3, 4]])
 
