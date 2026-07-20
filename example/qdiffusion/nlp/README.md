@@ -106,3 +106,16 @@ bash example/qdiffusion/nlp/run_edlm_head_ablation.sh
 
 The script records separate logs, checkpoints, and five-second GPU-memory
 traces for the scalar and BM runs.
+
+After training, `run_edlm_head_eval.sh` evaluates the two checkpoints
+sequentially with the same post-construction RNG reset, K=2 proposal pool,
+early diffusion-time window `[0.8, 1.0]`, sampling temperature, sequence
+length, steps, batch size, and GPT-2 Large evaluator:
+
+```bash
+PROFILE=smoke \
+ROOT=/path/to/isolated/checkout \
+SCALAR_CHECKPOINT=/path/to/scalar.pt \
+BM_CHECKPOINT=/path/to/bm.pt \
+bash example/qdiffusion/nlp/run_edlm_head_eval.sh
+```
