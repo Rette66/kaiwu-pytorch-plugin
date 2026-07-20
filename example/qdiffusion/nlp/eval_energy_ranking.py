@@ -18,6 +18,11 @@ def _bootstrap_repo() -> None:
     for path in (str(repo_root / "src"), str(repo_root)):
         if path not in sys.path:
             sys.path.insert(0, path)
+    import kaiwu
+
+    local_namespace = str(repo_root / "src" / "kaiwu")
+    if local_namespace not in kaiwu.__path__:
+        kaiwu.__path__.insert(0, local_namespace)
 
 
 _bootstrap_repo()
