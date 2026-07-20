@@ -413,6 +413,10 @@ def candidate_teacher_nll(
         seq_len,
     )
     non_eos = flat_tokens.ne(eos_token_id)
+    # MDLM uses GPT-2's shared BOS/EOS token at position zero. Treat that
+    # leading marker as BOS so it does not mask the entire generated sequence.
+    if seq_len:
+        non_eos[:, 0] = True
     attention_mask = torch.cat(
         [
             torch.ones_like(non_eos[:, :1]),

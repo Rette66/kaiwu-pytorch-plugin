@@ -881,6 +881,21 @@ def test_candidate_teacher_nll_returns_one_score_per_candidate():
     assert torch.allclose(nll, torch.full_like(nll, torch.log(torch.tensor(4.0))))
 
 
+def test_candidate_teacher_nll_treats_leading_eos_as_bos():
+    candidate_tokens = torch.tensor(
+        [[[0, 1, 2, 3]]],
+        dtype=torch.long,
+    )
+
+    nll = candidate_teacher_nll(
+        candidate_tokens,
+        FakeCausalLM(),
+        eos_token_id=0,
+    )
+
+    assert torch.allclose(nll, torch.full_like(nll, torch.log(torch.tensor(4.0))))
+
+
 def test_recovery_ranking_prefers_candidates_matching_masked_targets():
     outputs = {
         "targets": torch.tensor([[1, 2, 3, 4]]),
