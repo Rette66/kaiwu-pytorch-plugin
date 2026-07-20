@@ -48,11 +48,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--importance-start-t", type=float, default=1.0)
     parser.add_argument("--importance-end-t", type=float, default=0.8)
     parser.add_argument("--energy-temperature", type=float, default=1.0)
+    parser.add_argument(
+        "--allow-bm-ablation",
+        action="store_true",
+        help="Allow a BM checkpoint in the post-EDLM head ablation.",
+    )
     parser.add_argument("--seed", type=int)
     return parser.parse_args()
 
 
-def _load_scalar_energy(
+def _load_energy(
     args: argparse.Namespace,
     proposal: MDLMBackbone,
     device: torch.device,
@@ -63,10 +68,13 @@ def _load_scalar_energy(
         args.num_candidates = 2
     checkpoint = read_energy_checkpoint(args.energy_checkpoint)
     metadata = checkpoint["metadata"]
-    if metadata.get("energy_type") != "scalar":
+    energy_type = metadata.get("energy_type", "scalar")
+    if energy_type not in {"scalar", "bm"}:
+        raise ValueError(f"Unsupported energy checkpoint type: {energy_type!r}.")
+    if energy_type == "bm" and not args.allow_bm_ablation:
         raise ValueError(
             "The paper reproduction accepts only an EDLM scalar checkpoint; "
-            "BM checkpoints belong to a later ablation."
+            "pass --allow-bm-ablation only for the controlled head ablation."
         )
     trained_checkpoint = metadata.get("mdlm_checkpoint")
     if trained_checkpoint is not None and trained_checkpoint != args.checkpoint:
@@ -86,9 +94,15 @@ def _load_scalar_energy(
     generator = build_mdlm_qdiffusion(
         proposal,
         use_energy=True,
-        energy_type="scalar",
-        energy_feature_mode="edlm_pair",
+        energy_type=energy_type,
+        energy_feature_mode=metadata.get("feature_mode", "edlm_pair"),
         energy_backbone=energy_backbone,
+        bm_num_visible=int(metadata.get("bm_num_visible", 64)),
+        bm_num_hidden=int(metadata.get("bm_num_hidden", 32)),
+        bm_visible_transform=metadata.get("visible_transform", "identity"),
+        bm_sampler_type=metadata.get("sampler_type", "sa"),
+        bm_sampler_kwargs=metadata.get("sampler_kwargs", {}),
+        bm_scoring_mode=metadata.get("scoring_mode", "sampler"),
         num_candidates=args.num_candidates,
         dtype=torch.float32,
         device=device,
@@ -125,7 +139,7 @@ def main() -> None:
         .to(device)
         .eval()
     )
-    energy_model = _load_scalar_energy(args, proposal, device)
+    energy_model = _load_energy(args, proposal, device)
     sampler = EDLMDDPMCacheSampler(
         proposal,
         mask_id=proposal.mask_id,
@@ -136,6 +150,11 @@ def main() -> None:
         importance_end_t=args.importance_end_t,
         noise_removal=True,
     )
+    # Model construction consumes a head-dependent number of random values.
+    # Reset here so scalar and BM runs with the same seed receive the same
+    # proposal candidates and multinomial selection stream.
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     num_records = 0
