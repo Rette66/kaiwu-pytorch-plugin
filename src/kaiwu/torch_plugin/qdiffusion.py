@@ -92,12 +92,6 @@ class QDiffusionConfig:
     proposal_temperature: float = 0.0
     proposal_noise_scale: float = 1.0
     energy_temperature: float = 1.0
-    proposal_score_weight: float = 0.0
-    residual_guidance_weight: float | None = None
-    residual_fallback_margin: float = 0.0
-    include_greedy_candidate: bool = False
-    energy_guidance_start_ratio: float = 0.0
-    energy_guidance_end_ratio: float = 1.0
     use_energy: bool = True
     suppress_eos: bool = True
     disable_resample: bool = False
@@ -294,22 +288,6 @@ class QDiffusion(nn.Module):
         self.energy_model = energy_model
         self.token_spec = token_spec
         self.config = config or QDiffusionConfig()
-        if not 0.0 <= self.config.energy_guidance_start_ratio <= 1.0:
-            raise ValueError(
-                "energy_guidance_start_ratio must be between 0 and 1."
-            )
-        if not 0.0 <= self.config.energy_guidance_end_ratio <= 1.0:
-            raise ValueError(
-                "energy_guidance_end_ratio must be between 0 and 1."
-            )
-        if (
-            self.config.energy_guidance_start_ratio
-            > self.config.energy_guidance_end_ratio
-        ):
-            raise ValueError(
-                "energy_guidance_start_ratio must not exceed "
-                "energy_guidance_end_ratio."
-            )
         self.dtype = dtype
 
         if freeze_proposal:
@@ -416,20 +394,13 @@ class QDiffusion(nn.Module):
         )
 
     def objective(
-        self,
-        batch: dict[str, torch.Tensor],
-        weighting: str = "constant",
-        *,
-        rollout_steps: int = 0,
-        rollout_max_steps: int = 64,
+        self, batch: dict[str, torch.Tensor], weighting: str = "constant"
     ) -> dict[str, torch.Tensor]:
         """Builds the one-step training objective used by an external loop.
 
         Args:
             batch: Batch dictionary containing at least ``batch["targets"]``.
             weighting: Per-sample timestep weighting mode.
-            rollout_steps: Proposal-only reverse steps before negative sampling.
-            rollout_max_steps: Decode schedule length used by the rollout.
 
         Returns:
             dict[str, torch.Tensor]: A dictionary containing proposal logits,
@@ -445,49 +416,27 @@ class QDiffusion(nn.Module):
             )
         else:
             maskable_mask = maskable_mask.to(device=target.device, dtype=torch.bool)
-        if rollout_steps < 0:
-            raise ValueError("rollout_steps must be non-negative.")
-        if rollout_max_steps <= 0:
-            raise ValueError("rollout_max_steps must be positive.")
-        if rollout_steps >= rollout_max_steps:
-            raise ValueError(
-                "rollout_steps must be smaller than rollout_max_steps."
-            )
-        if rollout_steps and self.config.use_coupled_sampling:
-            raise ValueError(
-                "On-policy rollout is incompatible with coupled sampling."
-            )
+        first_timestep, second_timestep = torch.randint(
+            1,
+            self.config.num_diffusion_timesteps + 1,
+            (2 * target.size(0),),
+            device=target.device,
+        ).chunk(2)
 
-        if rollout_steps:
-            sample_outputs = self._sample_training_rollout(
+        if self.config.use_coupled_sampling:
+            sample_outputs = self._sample_coupled(
                 target,
+                first_timestep,
+                second_timestep,
                 maskable_mask,
-                rollout_steps=rollout_steps,
-                rollout_max_steps=rollout_max_steps,
             )
+            target = target.repeat(2, 1)
         else:
-            first_timestep, second_timestep = torch.randint(
-                1,
-                self.config.num_diffusion_timesteps + 1,
-                (2 * target.size(0),),
-                device=target.device,
-            ).chunk(2)
-
-        if not rollout_steps:
-            if self.config.use_coupled_sampling:
-                sample_outputs = self._sample_coupled(
-                    target,
-                    first_timestep,
-                    second_timestep,
-                    maskable_mask,
-                )
-                target = target.repeat(2, 1)
-            else:
-                sample_outputs = self._sample(
-                    target,
-                    first_timestep,
-                    maskable_mask,
-                )
+            sample_outputs = self._sample(
+                target,
+                first_timestep,
+                maskable_mask,
+            )
 
         noisy_tokens = sample_outputs["x_t"]
         timesteps = sample_outputs["t"]
@@ -582,15 +531,12 @@ class QDiffusion(nn.Module):
         self,
         state: dict[str, Any],
         partial_masks: torch.Tensor | None = None,
-        *,
-        use_energy: bool | None = None,
     ) -> dict[str, Any]:
         """Runs one denoising/reranking step and returns updated state.
 
         Args:
             state: Current decode state created by :meth:`initialize_state`.
             partial_masks: Optional boolean mask of fixed positions.
-            use_energy: Optional override used by proposal-only training rollouts.
 
         Returns:
             dict[str, Any]: The updated decode state after one iteration.
@@ -598,11 +544,7 @@ class QDiffusion(nn.Module):
         partial_masks = (
             partial_masks if partial_masks is not None else state.get("partial_masks")
         )
-        step_outputs = self._decode_step(
-            state,
-            partial_masks=partial_masks,
-            use_energy=use_energy,
-        )
+        step_outputs = self._decode_step(state, partial_masks=partial_masks)
 
         editable_token_mask = self.get_non_special_symbol_mask(
             state["output_tokens"], partial_masks=partial_masks
@@ -746,95 +688,6 @@ class QDiffusion(nn.Module):
             "loss_mask": first_timestep_mask,
         }
 
-    def _sample_training_rollout(
-        self,
-        clean_tokens: torch.Tensor,
-        maskable_mask: torch.Tensor,
-        *,
-        rollout_steps: int,
-        rollout_max_steps: int,
-    ) -> dict[str, torch.Tensor]:
-        """Builds a proposal-only reverse-trajectory state for energy training."""
-
-        min_timestep = math.ceil(
-            (rollout_steps + 1)
-            * self.config.num_diffusion_timesteps
-            / rollout_max_steps
-        )
-        shared_timestep = torch.randint(
-            min_timestep,
-            self.config.num_diffusion_timesteps + 1,
-            (1,),
-            device=clean_tokens.device,
-        )
-        timesteps = shared_timestep.expand(clean_tokens.size(0))
-        sample_outputs = self._sample(
-            clean_tokens,
-            timesteps,
-            maskable_mask,
-        )
-        noisy_tokens = sample_outputs["x_t"]
-        noisy_mask = sample_outputs["loss_mask"]
-        output_scores = torch.zeros_like(noisy_tokens, dtype=torch.float)
-        output_scores.masked_fill_(noisy_mask, -math.inf)
-        initial_step = int(
-            round(
-                (
-                    1
-                    - float(shared_timestep.item())
-                    / self.config.num_diffusion_timesteps
-                )
-                * rollout_max_steps
-            )
-        )
-        initial_step = min(
-            initial_step,
-            rollout_max_steps - rollout_steps - 1,
-        )
-        state = {
-            "output_tokens": noisy_tokens,
-            "output_scores": output_scores,
-            "output_masks": noisy_mask,
-            "step": max(initial_step, 0),
-            "max_steps": rollout_max_steps,
-            "history": [noisy_tokens.clone()],
-            "temperature": 1.0,
-            "partial_masks": None,
-        }
-        with torch.no_grad():
-            for _ in range(rollout_steps):
-                state = self.step(state, use_energy=False)
-
-        rollout_tokens = state["output_tokens"]
-        rollout_mask = state["output_masks"] & maskable_mask
-        empty_rows = ~rollout_mask.any(dim=-1)
-        if empty_rows.any():
-            eligible = maskable_mask[empty_rows].float()
-            fallback_positions = eligible.argmax(dim=-1, keepdim=True)
-            fallback_mask = torch.zeros_like(
-                maskable_mask[empty_rows]
-            ).scatter_(1, fallback_positions, True)
-            rollout_mask = rollout_mask.clone()
-            rollout_mask[empty_rows] = fallback_mask
-            rollout_tokens = rollout_tokens.clone()
-            rollout_tokens[empty_rows] = rollout_tokens[empty_rows].masked_fill(
-                fallback_mask,
-                self.mask_id,
-            )
-
-        mask_fraction = (
-            rollout_mask.sum(dim=-1).float()
-            / maskable_mask.sum(dim=-1).clamp_min(1)
-        )
-        equivalent_timestep = (
-            mask_fraction * self.config.num_diffusion_timesteps
-        ).round().clamp_min(1)
-        return {
-            "x_t": rollout_tokens,
-            "t": equivalent_timestep,
-            "loss_mask": rollout_mask,
-        }
-
     def _sample_coupled(
         self,
         clean_tokens: torch.Tensor,
@@ -964,51 +817,16 @@ class QDiffusion(nn.Module):
             tuple[torch.Tensor, torch.Tensor]: A tuple ``(tokens, scores)`` shaped as
             ``[batch, num_candidates, seq_len]``.
         """
+        samples, scores = stochastic_sample_from_categorical_n(
+            logits,
+            temperature=self.config.proposal_temperature,
+            noise_scale=self.config.proposal_noise_scale,
+            n=num_candidates,
+        )
         batch_size = logits.size(0)
-        sampled_count = num_candidates
-        greedy_tokens = None
-        if self.config.include_greedy_candidate:
-            sampled_count -= 1
-            greedy_tokens = logits.argmax(dim=-1, keepdim=False)
-
-        if sampled_count:
-            samples, _ = stochastic_sample_from_categorical_n(
-                logits,
-                temperature=self.config.proposal_temperature,
-                noise_scale=self.config.proposal_noise_scale,
-                n=sampled_count,
-            )
-            candidate_tokens = self._reshape_candidates(
-                samples,
-                batch_size,
-                sampled_count,
-            )
-        else:
-            candidate_tokens = logits.new_empty(
-                batch_size,
-                0,
-                logits.size(1),
-                dtype=torch.long,
-            )
-        if greedy_tokens is not None:
-            candidate_tokens = torch.cat(
-                [greedy_tokens.unsqueeze(1), candidate_tokens],
-                dim=1,
-            )
-
-        proposal_log_probs = logits.log_softmax(dim=-1)
-        candidate_scores = proposal_log_probs.unsqueeze(1).expand(
-            -1,
-            num_candidates,
-            -1,
-            -1,
-        ).gather(
-            dim=-1,
-            index=candidate_tokens.unsqueeze(-1),
-        ).squeeze(-1)
         return (
-            candidate_tokens,
-            candidate_scores,
+            self._reshape_candidates(samples, batch_size, num_candidates),
+            self._reshape_candidates(scores, batch_size, num_candidates),
         )
 
     def _score_candidates(
@@ -1038,8 +856,6 @@ class QDiffusion(nn.Module):
         noisy_tokens: torch.Tensor,
         candidate_tokens: torch.Tensor,
         candidate_scores: torch.Tensor,
-        *,
-        use_energy: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Selects one candidate per batch element by energy-based reranking.
 
@@ -1052,75 +868,12 @@ class QDiffusion(nn.Module):
             tuple[torch.Tensor, torch.Tensor]: A tuple ``(tokens, scores)``
             for the selected candidate per sample.
         """
-        if use_energy is None:
-            use_energy = self.config.use_energy
-        if use_energy:
+        if self.config.use_energy:
             energies = self._score_candidates(noisy_tokens, candidate_tokens)
-            if self.config.residual_guidance_weight is not None:
-                proposal_sequence_scores = candidate_scores.sum(dim=-1)
-                proposal_scale = proposal_sequence_scores.std(
-                    dim=-1,
-                    keepdim=True,
-                    unbiased=False,
-                ).clamp_min(1e-6)
-                proposal_z = (
-                    proposal_sequence_scores
-                    - proposal_sequence_scores.mean(dim=-1, keepdim=True)
-                ) / proposal_scale
-                energy_scale = energies.std(
-                    dim=-1,
-                    keepdim=True,
-                    unbiased=False,
-                ).clamp_min(1e-6)
-                energy_z = (
-                    energies - energies.mean(dim=-1, keepdim=True)
-                ) / energy_scale
-                selection_logits = proposal_z - (
-                    self.config.residual_guidance_weight * energy_z
-                )
-                selected_idx = selection_logits.argmax(dim=-1)
-                if self.config.include_greedy_candidate:
-                    selected_score = selection_logits.gather(
-                        dim=-1,
-                        index=selected_idx.unsqueeze(-1),
-                    ).squeeze(-1)
-                    baseline_score = selection_logits[:, 0]
-                    use_residual = (
-                        selected_score - baseline_score
-                        >= self.config.residual_fallback_margin
-                    )
-                    selected_idx = torch.where(
-                        use_residual,
-                        selected_idx,
-                        torch.zeros_like(selected_idx),
-                    )
-            else:
-                selection_logits = -energies / self.config.energy_temperature
-                if self.config.proposal_score_weight:
-                    proposal_sequence_scores = candidate_scores.sum(dim=-1)
-                    centered_scores = (
-                        proposal_sequence_scores
-                        - proposal_sequence_scores.mean(dim=-1, keepdim=True)
-                    )
-                    score_scale = centered_scores.std(
-                        dim=-1,
-                        keepdim=True,
-                        unbiased=False,
-                    ).clamp_min(1e-6)
-                    selection_logits = selection_logits + (
-                        self.config.proposal_score_weight
-                        * centered_scores
-                        / score_scale
-                    )
-                selection_logits = selection_logits - selection_logits.max(
-                    dim=-1,
-                    keepdim=True,
-                )[0]
-                weights = torch.softmax(
-                    selection_logits,
-                    dim=-1,
-                )
-                selected_idx = torch.multinomial(weights, 1).squeeze(-1)
+            selection_logits = -energies / self.config.energy_temperature
+            selection_logits -= selection_logits.max(dim=-1, keepdim=True)[0]
+            weights = torch.softmax(selection_logits, dim=-1)
+            selected_idx = torch.multinomial(weights, 1).squeeze(-1)
         else:
             proposal_sequence_scores = candidate_scores.sum(dim=-1)
             selected_idx = proposal_sequence_scores.argmax(dim=-1)
@@ -1175,7 +928,10 @@ class QDiffusion(nn.Module):
             logits, temperature=0.0
         )
         resample_input.masked_scatter_(resample_masks, new_tokens[resample_masks])
-        resample_scores.masked_scatter_(resample_masks, new_scores[resample_masks])
+        resample_scores.masked_scatter_(
+            resample_masks,
+            new_scores[resample_masks].to(dtype=resample_scores.dtype),
+        )
         tokens[to_be_resampled] = resample_input
         scores[to_be_resampled] = resample_scores
 
@@ -1183,8 +939,6 @@ class QDiffusion(nn.Module):
         self,
         state: dict[str, Any],
         partial_masks: torch.Tensor | None = None,
-        *,
-        use_energy: bool | None = None,
     ) -> dict[str, Any]:
         """Runs proposal, reranking, and optional resampling for one step.
 
@@ -1216,22 +970,10 @@ class QDiffusion(nn.Module):
             fixed_scores = output_scores[:, None, :].expand_as(candidate_scores)
             candidate_tokens = torch.where(fixed_mask, fixed_tokens, candidate_tokens)
             candidate_scores = torch.where(fixed_mask, fixed_scores, candidate_scores)
-        guidance_progress = state["step"] / max(state["max_steps"], 1)
-        if use_energy is None:
-            use_energy = (
-                self.config.use_energy
-                and guidance_progress
-                >= self.config.energy_guidance_start_ratio
-                and guidance_progress
-                <= self.config.energy_guidance_end_ratio
-            )
-        else:
-            use_energy = self.config.use_energy and use_energy
         selected_tokens, selected_scores = self._select_candidates(
             output_tokens,
             candidate_tokens,
             candidate_scores,
-            use_energy=use_energy,
         )
 
         if not self.config.disable_resample:

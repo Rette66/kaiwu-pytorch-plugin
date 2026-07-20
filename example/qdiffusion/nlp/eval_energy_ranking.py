@@ -56,8 +56,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-length", type=int, default=64)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--num-candidates", type=int, default=4)
-    parser.add_argument("--on-policy-rollout-steps", type=int, default=0)
-    parser.add_argument("--on-policy-max-steps", type=int, default=64)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
@@ -71,9 +69,6 @@ def evaluate_ranking(
     generator,
     loader,
     teacher_model,
-    *,
-    on_policy_rollout_steps: int = 0,
-    on_policy_max_steps: int = 64,
 ) -> dict[str, float | int]:
     """Compares BM ordering with causal-LM candidate NLL ordering."""
 
@@ -99,11 +94,7 @@ def evaluate_ranking(
 
     with torch.no_grad():
         for batch in loader:
-            outputs = generator.objective(
-                batch,
-                rollout_steps=on_policy_rollout_steps,
-                rollout_max_steps=on_policy_max_steps,
-            )
+            outputs = generator.objective(batch)
             energies = outputs["candidate_energies"]
             teacher_nll = candidate_teacher_nll(
                 outputs["candidate_tokens"],
@@ -351,16 +342,12 @@ def main() -> None:
         generator,
         loader,
         teacher_model,
-        on_policy_rollout_steps=args.on_policy_rollout_steps,
-        on_policy_max_steps=args.on_policy_max_steps,
     )
     result = {
         "energy_checkpoint": str(args.energy_checkpoint),
         "input": str(args.input),
         "offset": args.offset,
         "seed": args.seed,
-        "on_policy_rollout_steps": args.on_policy_rollout_steps,
-        "on_policy_max_steps": args.on_policy_max_steps,
         **metrics,
     }
     serialized = json.dumps(result, indent=2)

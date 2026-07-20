@@ -42,6 +42,7 @@ class EDLMDDPMCacheSampler:
         energy_temperature: float = 1.0,
         importance_start_t: float = 1.0,
         importance_end_t: float = 0.0,
+        noise_removal: bool = True,
         eps: float = 1e-5,
     ) -> None:
         if num_candidates <= 0:
@@ -67,6 +68,7 @@ class EDLMDDPMCacheSampler:
         self.energy_temperature = float(energy_temperature)
         self.importance_start_t = float(importance_start_t)
         self.importance_end_t = float(importance_end_t)
+        self.noise_removal = bool(noise_removal)
         self.eps = float(eps)
         self.last_stats: dict[str, Any] = {}
 
@@ -185,6 +187,10 @@ class EDLMDDPMCacheSampler:
                 cached_x0_probs = None
             tokens = next_tokens
 
+        if self.noise_removal:
+            tokens = self.proposal_model(tokens).argmax(dim=-1)
+            proposal_forwards += 1
+
         self.last_stats = {
             "num_steps": num_steps,
             "proposal_forwards": proposal_forwards,
@@ -192,5 +198,6 @@ class EDLMDDPMCacheSampler:
             "importance_start_t": self.importance_start_t,
             "importance_end_t": self.importance_end_t,
             "num_candidates": self.num_candidates,
+            "noise_removal": self.noise_removal,
         }
         return tokens

@@ -83,6 +83,13 @@ class CountingFakeMDLM(FakeMDLM):
         return super().forward(**kwargs)
 
 
+class BFloat16CountingFakeMDLM(CountingFakeMDLM):
+    def forward(self, **kwargs):
+        outputs = super().forward(**kwargs)
+        outputs.logits = outputs.logits.to(torch.bfloat16)
+        return outputs
+
+
 class LayeredFakeMDLM(FakeMDLM):
     def __init__(self) -> None:
         super().__init__()
@@ -615,6 +622,30 @@ def test_enabled_resampler_reenters_proposal_model():
         partial_masks=fixed_prompt,
     )
 
+    assert proposal.forward_batch_sizes == [1, 1]
+
+
+def test_resampler_casts_bfloat16_scores_to_generation_score_dtype():
+    proposal = BFloat16CountingFakeMDLM()
+    backbone = MDLMBackbone(proposal, FakeTokenizer(), mask_id=5)
+    baseline = build_mdlm_qdiffusion(
+        backbone,
+        use_energy=False,
+        proposal_noise_scale=0.0,
+        disable_resample=False,
+        resample_ratio=0.5,
+        dtype=torch.float32,
+    )
+    input_tokens = torch.tensor([[1, 5, 5, 5, 5]])
+    fixed_prompt = torch.tensor([[True, False, False, False, False]])
+
+    output = baseline.generate(
+        input_tokens,
+        max_steps=1,
+        partial_masks=fixed_prompt,
+    )
+
+    assert output.shape == input_tokens.shape
     assert proposal.forward_batch_sizes == [1, 1]
 
 

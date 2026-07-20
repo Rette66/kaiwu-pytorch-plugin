@@ -96,13 +96,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--teacher-temperature", type=float, default=1.0)
     parser.add_argument("--ranking-energy-temperature", type=float, default=1.0)
     parser.add_argument("--binary-loss-weight", type=float, default=0.1)
-    parser.add_argument(
-        "--on-policy-rollout-steps",
-        type=int,
-        default=0,
-        help="Proposal-only reverse steps used to build training states.",
-    )
-    parser.add_argument("--on-policy-max-steps", type=int, default=64)
     parser.add_argument("--recovery-ranking-weight", type=float, default=0.0)
     parser.add_argument(
         "--recovery-ranking-temperature",
@@ -202,8 +195,6 @@ def run_epoch(
     teacher_temperature: float = 1.0,
     ranking_energy_temperature: float = 1.0,
     binary_loss_weight: float = 0.1,
-    on_policy_rollout_steps: int = 0,
-    on_policy_max_steps: int = 64,
     recovery_ranking_weight: float = 0.0,
     recovery_ranking_temperature: float = 0.05,
 ) -> dict[str, float]:
@@ -229,11 +220,7 @@ def run_epoch(
     context = torch.enable_grad if training else torch.no_grad
     with context():
         for batch in loader:
-            outputs = generator.objective(
-                batch,
-                rollout_steps=on_policy_rollout_steps,
-                rollout_max_steps=on_policy_max_steps,
-            )
+            outputs = generator.objective(batch)
             binary_loss = (
                 outputs["energy_objective"] * outputs["weight"]
             ).mean()
@@ -499,13 +486,6 @@ def main() -> None:
     args = parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("MDLM energy training requires a Linux/CUDA environment.")
-    if args.on_policy_rollout_steps < 0:
-        raise ValueError("--on-policy-rollout-steps must be non-negative.")
-    if args.on_policy_rollout_steps >= args.on_policy_max_steps:
-        raise ValueError(
-            "--on-policy-rollout-steps must be smaller than "
-            "--on-policy-max-steps."
-        )
     if args.recovery_ranking_weight < 0:
         raise ValueError("--recovery-ranking-weight must be non-negative.")
     if args.objective == "ranking" and args.recovery_ranking_weight:
@@ -621,8 +601,6 @@ def main() -> None:
             "teacher_temperature": args.teacher_temperature,
             "ranking_energy_temperature": args.ranking_energy_temperature,
             "binary_loss_weight": args.binary_loss_weight,
-            "on_policy_rollout_steps": args.on_policy_rollout_steps,
-            "on_policy_max_steps": args.on_policy_max_steps,
             "recovery_ranking_weight": args.recovery_ranking_weight,
             "recovery_ranking_temperature": (
                 args.recovery_ranking_temperature
@@ -684,10 +662,6 @@ def main() -> None:
                         if args.objective == "ranking"
                         else None
                     ),
-                    "on_policy_rollout_steps": (
-                        args.on_policy_rollout_steps
-                    ),
-                    "on_policy_max_steps": args.on_policy_max_steps,
                     "recovery_ranking_weight": (
                         args.recovery_ranking_weight
                     ),

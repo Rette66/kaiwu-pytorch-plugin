@@ -5,13 +5,27 @@ set -euo pipefail
 ROOT="${ROOT:-/data2/wwx/kaiwu-pytorch-plugin}"
 PY="${PY:-/data/conda/envs/wwx_py310/bin/python}"
 MODEL="${MODEL:-/data2/wwx/mdlm}"
-SCALAR_CHECKPOINT="${SCALAR_CHECKPOINT:-${ROOT}/example/qdiffusion/outputs/edlm_head_ablation_20260717_192902/edlm_scalar_owt2000_u12.pt}"
+PROFILE="${PROFILE:-smoke}"
 SEED="${SEED:-$("${PY}" -c 'import secrets; print(secrets.randbelow(2**31))')}"
-STEPS="${STEPS:-512}"
+OUTPUT_DIR="${OUTPUT_DIR:-${ROOT}/example/qdiffusion/outputs/edlm_reproduction_$(date +%Y%m%d_%H%M%S)}"
+
+case "${PROFILE}" in
+  smoke)
+    NUM_SAMPLES="${NUM_SAMPLES:-4}"
+    ;;
+  paper)
+    NUM_SAMPLES="${NUM_SAMPLES:-128}"
+    ;;
+  *)
+    echo "PROFILE must be smoke or paper" >&2
+    exit 2
+    ;;
+esac
+
+STEPS="${STEPS:-1000}"
 SEQUENCE_LENGTH="${SEQUENCE_LENGTH:-1024}"
-NUM_SAMPLES="${NUM_SAMPLES:-4}"
-BATCH_SIZE="${BATCH_SIZE:-2}"
-OUTPUT_DIR="${OUTPUT_DIR:-${ROOT}/example/qdiffusion/outputs/edlm_paper_aligned_$(date +%Y%m%d_%H%M%S)}"
+BATCH_SIZE="${BATCH_SIZE:-1}"
+EVALUATOR="${EVALUATOR:-gpt2-large}"
 
 mkdir -p "${OUTPUT_DIR}"
 cd "${ROOT}"
@@ -22,71 +36,58 @@ export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 export TOKENIZERS_PARALLELISM=false
 
+"${PY}" - <<'PY' > "${OUTPUT_DIR}/environment.json"
+import json
+import platform
+import torch
+import transformers
+
+print(json.dumps({
+    "python": platform.python_version(),
+    "torch": torch.__version__,
+    "torch_cuda": torch.version.cuda,
+    "cuda_available": torch.cuda.is_available(),
+    "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+    "transformers": transformers.__version__,
+}))
+PY
+
 printf '%s\n' \
+  "official_edlm_commit=97e3146964f76aaa784fe523c673516efc7af0e0" \
+  "profile=${PROFILE}" \
   "seed=${SEED}" \
   "steps=${STEPS}" \
   "sequence_length=${SEQUENCE_LENGTH}" \
   "num_samples=${NUM_SAMPLES}" \
   "batch_size=${BATCH_SIZE}" \
   "model=${MODEL}" \
-  "scalar_checkpoint=${SCALAR_CHECKPOINT}" \
-  "gen_ppl_evaluator=gpt2" \
+  "evaluator=${EVALUATOR}" \
   > "${OUTPUT_DIR}/config.txt"
 
-log_stage() {
-  printf '%s stage=%s\n' "$(date --iso-8601=seconds)" "$1" \
-    | tee -a "${OUTPUT_DIR}/driver.log"
-}
+printf '%s stage=baseline_start\n' "$(date --iso-8601=seconds)" \
+  | tee -a "${OUTPUT_DIR}/driver.log"
+"${PY}" -m example.qdiffusion.nlp.sample_edlm \
+  --checkpoint "${MODEL}" \
+  --tokenizer gpt2 \
+  --sequence-length "${SEQUENCE_LENGTH}" \
+  --steps "${STEPS}" \
+  --num-samples "${NUM_SAMPLES}" \
+  --batch-size "${BATCH_SIZE}" \
+  --seed "${SEED}" \
+  --output "${OUTPUT_DIR}/baseline.jsonl" \
+  > "${OUTPUT_DIR}/baseline.log" 2>&1
+printf '%s stage=baseline_done\n' "$(date --iso-8601=seconds)" \
+  | tee -a "${OUTPUT_DIR}/driver.log"
 
-generate() {
-  local name="$1"
-  shift
-  log_stage "${name}_start"
-  "${PY}" -m example.qdiffusion.nlp.smoke_generate \
-    --checkpoint "${MODEL}" \
-    --tokenizer gpt2 \
-    --sampling-method edlm-ddpm-cache \
-    --unconditional \
-    --sequence-length "${SEQUENCE_LENGTH}" \
-    --steps "${STEPS}" \
-    --num-samples "${NUM_SAMPLES}" \
-    --batch-size "${BATCH_SIZE}" \
-    --seed "${SEED}" \
-    --output "${OUTPUT_DIR}/${name}.jsonl" \
-    "$@" \
-    > "${OUTPUT_DIR}/${name}.log" 2>&1
-  log_stage "${name}_done"
-}
+"${PY}" -m example.qdiffusion.nlp.eval_text_quality \
+  --input "${OUTPUT_DIR}/baseline.jsonl" \
+  > "${OUTPUT_DIR}/baseline.quality.json"
+"${PY}" -m example.qdiffusion.nlp.eval_gen_ppl \
+  --input "${OUTPUT_DIR}/baseline.jsonl" \
+  --token-ids-field token_ids \
+  --evaluator "${EVALUATOR}" \
+  --batch-size 1 \
+  > "${OUTPUT_DIR}/baseline.ppl.json"
 
-evaluate() {
-  local name="$1"
-  log_stage "${name}_eval_start"
-  "${PY}" -m example.qdiffusion.nlp.eval_text_quality \
-    --input "${OUTPUT_DIR}/${name}.jsonl" \
-    > "${OUTPUT_DIR}/${name}.quality.json"
-  "${PY}" -m example.qdiffusion.nlp.eval_gen_ppl \
-    --input "${OUTPUT_DIR}/${name}.jsonl" \
-    --token-ids-field token_ids \
-    --evaluator gpt2 \
-    --batch-size 4 \
-    > "${OUTPUT_DIR}/${name}.ppl.json"
-  log_stage "${name}_eval_done"
-}
-
-generate baseline_ddpm_cache --num-candidates 1
-generate scalar_k2_w1 \
-  --energy-checkpoint "${SCALAR_CHECKPOINT}" \
-  --num-candidates 2 \
-  --edlm-importance-start-t 1.0 \
-  --edlm-importance-end-t 0.0
-generate scalar_k2_w02 \
-  --energy-checkpoint "${SCALAR_CHECKPOINT}" \
-  --num-candidates 2 \
-  --edlm-importance-start-t 1.0 \
-  --edlm-importance-end-t 0.8
-
-for name in baseline_ddpm_cache scalar_k2_w1 scalar_k2_w02; do
-  evaluate "${name}"
-done
-
-log_stage all_done
+printf '%s stage=all_done\n' "$(date --iso-8601=seconds)" \
+  | tee -a "${OUTPUT_DIR}/driver.log"

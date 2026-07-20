@@ -77,31 +77,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--energy-temperature", type=float, default=1.0)
     parser.add_argument(
-        "--proposal-score-weight",
-        type=float,
-        default=0.0,
-        help="Standardized proposal-score weight used with BM energy.",
-    )
-    parser.add_argument("--residual-guidance-weight", type=float)
-    parser.add_argument("--residual-fallback-margin", type=float, default=0.0)
-    parser.add_argument(
-        "--include-greedy-candidate",
-        action="store_true",
-        help="Reserves candidate zero for the deterministic MDLM argmax.",
-    )
-    parser.add_argument(
-        "--energy-start-ratio",
-        type=float,
-        default=0.0,
-        help="Fraction of decode steps completed before BM guidance starts.",
-    )
-    parser.add_argument(
-        "--energy-end-ratio",
-        type=float,
-        default=1.0,
-        help="Fraction of decode steps after which energy guidance stops.",
-    )
-    parser.add_argument(
         "--edlm-importance-start-t",
         type=float,
         default=1.0,
@@ -242,11 +217,6 @@ def main() -> None:
     batch_size = args.batch_size or args.num_samples
     if batch_size <= 0:
         raise ValueError("--batch-size must be positive.")
-    if not 0.0 <= args.energy_start_ratio <= args.energy_end_ratio <= 1.0:
-        raise ValueError(
-            "Energy guidance ratios must satisfy "
-            "0 <= start <= end <= 1."
-        )
     if not (
         0.0
         <= args.edlm_importance_end_t
@@ -329,12 +299,6 @@ def main() -> None:
         ),
         num_candidates=num_candidates,
         energy_temperature=args.energy_temperature,
-        proposal_score_weight=args.proposal_score_weight,
-        residual_guidance_weight=args.residual_guidance_weight,
-        residual_fallback_margin=args.residual_fallback_margin,
-        include_greedy_candidate=args.include_greedy_candidate,
-        energy_guidance_start_ratio=args.energy_start_ratio,
-        energy_guidance_end_ratio=args.energy_end_ratio,
         disable_resample=not args.enable_resample,
         resample_ratio=args.resample_ratio,
         resample_top_p=args.resample_top_p,
