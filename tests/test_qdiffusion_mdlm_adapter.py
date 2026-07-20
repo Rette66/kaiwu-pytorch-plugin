@@ -317,6 +317,16 @@ def test_edlm_exponential_race_sampler_preserves_candidate_axes():
     assert torch.equal(samples[1], torch.tensor([[1, 0]]).expand(3, -1))
 
 
+def test_edlm_exponential_race_promotes_bfloat16_weights():
+    weights = torch.tensor([[[0.25, 0.75]]], dtype=torch.bfloat16)
+
+    torch.manual_seed(9)
+    samples = _sample_categorical(weights, num_samples=4)
+
+    assert samples.dtype == torch.long
+    assert samples.shape == (1, 4, 1)
+
+
 def test_edlm_importance_window_uses_early_reverse_steps():
     proposal = FixedDDPMProposal()
     energy = CountingCandidateEnergy()

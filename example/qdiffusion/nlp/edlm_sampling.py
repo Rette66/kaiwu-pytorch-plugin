@@ -19,7 +19,11 @@ def _sample_categorical(
     if weights.ndim != 3:
         raise ValueError("weights must have shape (batch, sequence, vocab).")
     batch_size, sequence_length, _ = weights.shape
-    repeated_weights = weights.repeat(num_samples, 1, 1)
+    # The released MDLM backbone emits bfloat16 probabilities, while the
+    # reference transition arithmetic promotes them with float32 timesteps.
+    # Keep the exponential race in float32 as well: bfloat16 uniforms do not
+    # have enough distinct values for a 50K-way race.
+    repeated_weights = weights.float().repeat(num_samples, 1, 1)
     exponential_noise = (
         1e-10
         - (torch.rand_like(repeated_weights) + 1e-10).log()
@@ -122,8 +126,15 @@ class EDLMDDPMCacheSampler:
         step_size: float,
         proposal_probs: torch.Tensor,
     ) -> torch.Tensor:
-        move_chance_t = timestep
-        move_chance_s = max(timestep - step_size, self.eps)
+        move_chance_t = torch.as_tensor(
+            timestep,
+            device=proposal_probs.device,
+            dtype=torch.float32,
+        )
+        move_chance_s = torch.clamp(
+            move_chance_t - step_size,
+            min=self.eps,
+        )
         transition_weights = proposal_probs * (
             move_chance_t - move_chance_s
         )
