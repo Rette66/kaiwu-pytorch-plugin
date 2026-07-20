@@ -138,23 +138,23 @@ def main() -> None:
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    records = []
+    num_records = 0
     aggregate_forwards = 0
     aggregate_guided_steps = 0
-    for batch_start in range(0, args.num_samples, args.batch_size):
-        batch_size = min(args.batch_size, args.num_samples - batch_start)
-        masked = torch.full(
-            (batch_size, args.sequence_length),
-            proposal.mask_id,
-            dtype=torch.long,
-            device=device,
-        )
-        samples = sampler.sample(masked, num_steps=args.steps)
-        aggregate_forwards += int(sampler.last_stats["proposal_forwards"])
-        aggregate_guided_steps += int(sampler.last_stats["guided_steps"])
-        for row in samples.cpu().tolist():
-            records.append(
-                {
+    with args.output.open("w", encoding="utf-8") as output_file:
+        for batch_start in range(0, args.num_samples, args.batch_size):
+            batch_size = min(args.batch_size, args.num_samples - batch_start)
+            masked = torch.full(
+                (batch_size, args.sequence_length),
+                proposal.mask_id,
+                dtype=torch.long,
+                device=device,
+            )
+            samples = sampler.sample(masked, num_steps=args.steps)
+            aggregate_forwards += int(sampler.last_stats["proposal_forwards"])
+            aggregate_guided_steps += int(sampler.last_stats["guided_steps"])
+            for row in samples.cpu().tolist():
+                record = {
                     "text": proposal.tokenizer.decode(
                         row,
                         skip_special_tokens=False,
@@ -169,16 +169,25 @@ def main() -> None:
                     "importance_start_t": args.importance_start_t,
                     "importance_end_t": args.importance_end_t,
                 }
+                output_file.write(
+                    json.dumps(record, ensure_ascii=False) + "\n"
+                )
+                num_records += 1
+            output_file.flush()
+            print(
+                json.dumps(
+                    {
+                        "generated": num_records,
+                        "num_samples": args.num_samples,
+                    }
+                ),
+                flush=True,
             )
-
-    with args.output.open("w", encoding="utf-8") as output_file:
-        for record in records:
-            output_file.write(json.dumps(record, ensure_ascii=False) + "\n")
     print(
         json.dumps(
             {
                 "resolved_seed": args.seed,
-                "num_samples": len(records),
+                "num_samples": num_records,
                 "proposal_forwards": aggregate_forwards,
                 "guided_steps": aggregate_guided_steps,
                 "output": str(args.output),

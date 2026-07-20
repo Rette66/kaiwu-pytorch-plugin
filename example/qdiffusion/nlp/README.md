@@ -53,6 +53,23 @@ Training uses one proposal negative and binary NCE:
 
 `softplus(E_positive) + softplus(-E_negative)`.
 
+The paper defaults are encoded directly in the dedicated trainer: sequence
+length 1024, global batch 512, AdamW with learning rate `3e-4` and no weight
+decay, EMA `0.9999`, continuous antithetic time sampling, and one million
+optimizer steps. Start with an explicit short validation run before scheduling
+the full training budget:
+
+```bash
+python -m example.qdiffusion.nlp.train_edlm_nce \
+  --input data/qdiffusion_nlp/openwebtext_train_2000.jsonl \
+  --checkpoint /data2/wwx/mdlm \
+  --output example/qdiffusion/outputs/edlm_scalar_nce.pt \
+  --sequence-length 1024 \
+  --micro-batch-size 1 \
+  --global-batch-size 512 \
+  --max-steps 1000000
+```
+
 At generation time, K=2 candidates are sampled only in the configured
 diffusion-time window and selected with weights proportional to `exp(-E)`.
 The paper's efficient setting is the early reverse-process window

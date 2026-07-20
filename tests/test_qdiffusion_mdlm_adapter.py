@@ -24,6 +24,12 @@ from example.qdiffusion.nlp.train_energy import (
     candidate_teacher_nll,
     recovery_ranking_objective,
 )
+from example.qdiffusion.nlp.train_edlm_nce import (
+    binary_nce_loss,
+    build_wrapped_blocks,
+    corrupt_tokens,
+    sample_antithetic_times,
+)
 from example.qdiffusion.nlp.builder import build_mdlm_qdiffusion
 from example.qdiffusion.nlp.checkpoint import (
     load_energy_weights,
@@ -159,6 +165,12 @@ class FakeTokenizer:
     pad_token_id = 0
     bos_token_id = 1
     eos_token_id = 2
+
+
+class FakeWrappingTokenizer(FakeTokenizer):
+    def encode(self, text, *, add_special_tokens):
+        assert not add_special_tokens
+        return [ord(character) % 7 + 3 for character in text]
 
 
 class FakeCausalTokenizer:
@@ -304,6 +316,58 @@ def test_edlm_importance_window_uses_early_reverse_steps():
 
     assert sampler.last_stats["guided_steps"] == 1
     assert energy.calls == 1
+
+
+def test_edlm_wrapped_blocks_match_bos_content_eos_layout():
+    tokenizer = FakeWrappingTokenizer()
+
+    blocks = build_wrapped_blocks(
+        ["ab", "cdef"],
+        tokenizer,
+        sequence_length=6,
+    )
+
+    assert len(blocks) == 2
+    assert all(block.tolist()[0] == tokenizer.bos_token_id for block in blocks)
+    assert all(block.tolist()[-1] == tokenizer.eos_token_id for block in blocks)
+    assert all(block.numel() == 6 for block in blocks)
+
+
+def test_edlm_antithetic_times_cover_stratified_intervals():
+    torch.manual_seed(3)
+
+    timesteps = sample_antithetic_times(
+        4,
+        device=torch.device("cpu"),
+        sampling_eps=1e-3,
+    )
+
+    interval_indices = torch.floor(
+        (timesteps - 1e-3) / (1.0 - 1e-3) * 4
+    ).long()
+    assert torch.equal(interval_indices, torch.arange(4))
+
+
+def test_edlm_loglinear_corruption_and_binary_nce_direction():
+    clean = torch.tensor([[1, 2, 3]])
+    torch.manual_seed(0)
+    noisy = corrupt_tokens(
+        clean,
+        torch.ones(1),
+        mask_id=9,
+        noise_eps=1e-3,
+    )
+    favorable = binary_nce_loss(
+        torch.tensor([[-2.0]]),
+        torch.tensor([[2.0]]),
+    )
+    reversed_loss = binary_nce_loss(
+        torch.tensor([[2.0]]),
+        torch.tensor([[-2.0]]),
+    )
+
+    assert noisy.eq(9).all()
+    assert favorable < reversed_loss
 
 
 def test_edlm_token_entropy_matches_reference_definition():

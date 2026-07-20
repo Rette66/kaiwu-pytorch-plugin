@@ -15,6 +15,7 @@ def save_energy_checkpoint(
     epoch: int,
     metric: float,
     extra_metadata: dict[str, Any] | None = None,
+    ema_state_dict: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """Saves compact energy weights without duplicating frozen MDLM weights."""
 
@@ -34,15 +35,18 @@ def save_energy_checkpoint(
     }
     compact_state = energy_model.compact_state_dict()
     compact_state["energy_encoder_trainable"] = trainable_encoder_state
-    torch.save(
-        {
-            "epoch": epoch,
-            "metric": metric,
-            "metadata": metadata,
-            "state_dict": compact_state,
-        },
-        path,
-    )
+    payload = {
+        "epoch": epoch,
+        "metric": metric,
+        "metadata": metadata,
+        "state_dict": compact_state,
+    }
+    if ema_state_dict is not None:
+        payload["ema_state_dict"] = {
+            name: value.detach().cpu()
+            for name, value in ema_state_dict.items()
+        }
+    torch.save(payload, path)
 
 
 def read_energy_checkpoint(
@@ -76,5 +80,10 @@ def load_energy_weights(generator, checkpoint: dict[str, Any]) -> None:
     if state_dict.get("energy_encoder_trainable"):
         energy_model.encoder.load_state_dict(
             state_dict["energy_encoder_trainable"],
+            strict=False,
+        )
+    if checkpoint.get("ema_state_dict"):
+        energy_model.load_state_dict(
+            checkpoint["ema_state_dict"],
             strict=False,
         )
