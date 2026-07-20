@@ -17,10 +17,15 @@ The baseline uses:
 - `kuleshov-group/mdlm-owt`;
 - unconditional OpenWebText generation at length 1024;
 - SUBS parameterization and log-linear masking;
-- `ddpm_cache` with 1000 reverse steps;
+- `ddpm_cache` with 1024 reverse steps for the paper's Table 3;
 - final noise removal;
-- 128 generated samples for the paper profile;
+- 128 generated samples for the resource-bounded reproduction profile;
 - GPT-2 Large generative perplexity over the generated GPT-2 token IDs.
+
+The paper computes Gen PPL from 2048 generated sequences. The released
+single-process sampling script emits 128 sequences per GPU/process, so this
+two-RTX-3090 workflow first uses 128 sequences as a variance-bearing
+reproduction estimate and records that sample-count difference explicitly.
 
 Run a four-sample pipeline check first:
 
@@ -55,9 +60,10 @@ Training uses one proposal negative and binary NCE:
 
 The paper defaults are encoded directly in the dedicated trainer: sequence
 length 1024, global batch 512, AdamW with learning rate `3e-4` and no weight
-decay, EMA `0.9999`, continuous antithetic time sampling, and one million
-optimizer steps. Start with an explicit short validation run before scheduling
-the full training budget:
+decay, 2500-step linear warmup followed by a constant learning rate, gradient
+clipping at `1.0`, EMA `0.9999`, continuous antithetic time sampling, and one
+million optimizer steps. Start with an explicit short validation run before
+scheduling the full training budget:
 
 ```bash
 python -m example.qdiffusion.nlp.train_edlm_nce \
@@ -70,10 +76,11 @@ python -m example.qdiffusion.nlp.train_edlm_nce \
   --max-steps 1000000
 ```
 
-At generation time, K=2 candidates are sampled only in the configured
-diffusion-time window and selected with weights proportional to `exp(-E)`.
-The paper's efficient setting is the early reverse-process window
-`t in [0.8, 1.0]` (width 0.2).
+At generation time, candidates are selected with weights proportional to
+`exp(-E)`. The paper's Table 3 generation-quality protocol applies importance
+sampling throughout the reverse process (`t in [0, 1]`). The separate
+efficiency protocol uses K=2 only in the early reverse-process window
+`t in [0.8, 1.0]` (width 0.2). Results from these protocols must not be mixed.
 
 The BM/Projector route will be reintroduced only after this scalar baseline is
 reproduced and frozen as a controlled reference.
@@ -109,8 +116,9 @@ traces for the scalar and BM runs.
 
 After training, `run_edlm_head_eval.sh` evaluates the two checkpoints
 sequentially with the same post-construction RNG reset, K=2 proposal pool,
-early diffusion-time window `[0.8, 1.0]`, sampling temperature, sequence
-length, steps, batch size, and GPT-2 Large evaluator:
+importance window, sampling temperature, sequence length, steps, batch size,
+and GPT-2 Large evaluator. Its default is the Table 3 full window `[0, 1]`;
+set `IMPORTANCE_END_T=0.8` for the separate efficiency protocol:
 
 ```bash
 PROFILE=smoke \

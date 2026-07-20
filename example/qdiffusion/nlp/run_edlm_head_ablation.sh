@@ -18,6 +18,7 @@ case "${PROFILE}" in
     GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-1}"
     MAX_STEPS="${MAX_STEPS:-1}"
     SAVE_EVERY="${SAVE_EVERY:-1}"
+    WARMUP_STEPS="${WARMUP_STEPS:-0}"
     ;;
   pilot)
     SEQUENCE_LENGTH="${SEQUENCE_LENGTH:-256}"
@@ -26,6 +27,7 @@ case "${PROFILE}" in
     GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-8}"
     MAX_STEPS="${MAX_STEPS:-100}"
     SAVE_EVERY="${SAVE_EVERY:-25}"
+    WARMUP_STEPS="${WARMUP_STEPS:-10}"
     ;;
   paper)
     SEQUENCE_LENGTH="${SEQUENCE_LENGTH:-1024}"
@@ -34,6 +36,7 @@ case "${PROFILE}" in
     GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-512}"
     MAX_STEPS="${MAX_STEPS:-1000000}"
     SAVE_EVERY="${SAVE_EVERY:-1000}"
+    WARMUP_STEPS="${WARMUP_STEPS:-2500}"
     ;;
   *)
     echo "PROFILE must be smoke, pilot, or paper" >&2
@@ -66,6 +69,8 @@ printf '%s\n' \
   "max_steps=${MAX_STEPS}" \
   "learning_rate=3e-4" \
   "weight_decay=0" \
+  "warmup_steps=${WARMUP_STEPS}" \
+  "gradient_clip_norm=1.0" \
   "ema_decay=0.9999" \
   "num_proposal_negatives=1" \
   "bm_num_visible=64" \
@@ -113,6 +118,8 @@ train_head() {
     --max-steps "${MAX_STEPS}" \
     --learning-rate 3e-4 \
     --weight-decay 0 \
+    --warmup-steps "${WARMUP_STEPS}" \
+    --gradient-clip-norm 1.0 \
     --ema-decay 0.9999 \
     --energy-type "${energy_type}" \
     --bm-num-visible 64 \

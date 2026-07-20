@@ -27,6 +27,7 @@ from example.qdiffusion.nlp.train_energy import (
 from example.qdiffusion.nlp.train_edlm_nce import (
     binary_nce_loss,
     build_wrapped_blocks,
+    constant_warmup_factor,
     corrupt_tokens,
     sample_antithetic_times,
 )
@@ -368,6 +369,14 @@ def test_edlm_loglinear_corruption_and_binary_nce_direction():
 
     assert noisy.eq(9).all()
     assert favorable < reversed_loss
+
+
+def test_edlm_constant_warmup_matches_official_schedule():
+    assert constant_warmup_factor(0, warmup_steps=2500) == 0.0
+    assert constant_warmup_factor(1250, warmup_steps=2500) == 0.5
+    assert constant_warmup_factor(2500, warmup_steps=2500) == 1.0
+    assert constant_warmup_factor(5000, warmup_steps=2500) == 1.0
+    assert constant_warmup_factor(0, warmup_steps=0) == 1.0
 
 
 def test_edlm_token_entropy_matches_reference_definition():

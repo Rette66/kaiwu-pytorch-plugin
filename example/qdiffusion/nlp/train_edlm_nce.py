@@ -16,6 +16,7 @@ import numpy as np
 import torch
 from torch.nn import functional as F
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 
 
@@ -56,6 +57,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=1_000_000)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.0)
+    parser.add_argument("--warmup-steps", type=int, default=2500)
+    parser.add_argument("--gradient-clip-norm", type=float, default=1.0)
     parser.add_argument("--ema-decay", type=float, default=0.9999)
     parser.add_argument("--sampling-eps", type=float, default=1e-3)
     parser.add_argument("--noise-eps", type=float, default=1e-3)
@@ -162,6 +165,16 @@ def binary_nce_loss(
     return (
         F.softplus(positive_energy) + F.softplus(-negative_energy)
     ).mean()
+
+
+def constant_warmup_factor(step: int, *, warmup_steps: int) -> float:
+    """Matches Transformers' constant schedule with linear warmup."""
+
+    if warmup_steps < 0:
+        raise ValueError("warmup_steps must be non-negative.")
+    if warmup_steps == 0:
+        return 1.0
+    return min(float(step) / float(warmup_steps), 1.0)
 
 
 @dataclass
@@ -279,6 +292,10 @@ def main() -> None:
         )
     if args.max_steps <= 0:
         raise ValueError("--max-steps must be positive.")
+    if args.warmup_steps < 0:
+        raise ValueError("--warmup-steps must be non-negative.")
+    if args.gradient_clip_norm <= 0:
+        raise ValueError("--gradient-clip-norm must be positive.")
     if args.log_every <= 0 or args.save_every <= 0:
         raise ValueError("--log-every and --save-every must be positive.")
     if args.bm_num_visible <= 0 or args.bm_num_hidden <= 0:
@@ -367,7 +384,16 @@ def main() -> None:
     optimizer = AdamW(
         trainable,
         lr=args.learning_rate,
+        betas=(0.9, 0.999),
+        eps=1e-8,
         weight_decay=args.weight_decay,
+    )
+    scheduler = LambdaLR(
+        optimizer,
+        lr_lambda=lambda step: constant_warmup_factor(
+            step,
+            warmup_steps=args.warmup_steps,
+        ),
     )
     ema = EMATracker.create(energy_model, args.ema_decay)
     accumulation_steps = args.global_batch_size // args.micro_batch_size
@@ -386,6 +412,10 @@ def main() -> None:
         "gradient_accumulation_steps": accumulation_steps,
         "learning_rate": args.learning_rate,
         "weight_decay": args.weight_decay,
+        "warmup_steps": args.warmup_steps,
+        "gradient_clip_norm": args.gradient_clip_norm,
+        "optimizer_betas": [0.9, 0.999],
+        "optimizer_eps": 1e-8,
         "ema_decay": args.ema_decay,
         "sampling_eps": args.sampling_eps,
         "noise_eps": args.noise_eps,
@@ -439,7 +469,12 @@ def main() -> None:
         if micro_step % accumulation_steps:
             continue
 
+        gradient_norm = torch.nn.utils.clip_grad_norm_(
+            trainable,
+            max_norm=args.gradient_clip_norm,
+        )
         optimizer.step()
+        scheduler.step()
         optimizer.zero_grad(set_to_none=True)
         ema.update(energy_model)
         optimizer_step += 1
@@ -447,6 +482,8 @@ def main() -> None:
             name: value / accumulation_steps
             for name, value in running.items()
         }
+        averaged["gradient_norm"] = float(gradient_norm)
+        averaged["learning_rate"] = float(scheduler.get_last_lr()[0])
         running.clear()
         if optimizer_step % args.log_every == 0 or optimizer_step == 1:
             print(json.dumps({"step": optimizer_step, **averaged}), flush=True)

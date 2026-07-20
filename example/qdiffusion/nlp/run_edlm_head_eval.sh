@@ -11,6 +11,10 @@ BM_CHECKPOINT="${BM_CHECKPOINT:?Set BM_CHECKPOINT}"
 PROFILE="${PROFILE:-smoke}"
 SEED="${SEED:-$("${PY}" -c 'import secrets; print(secrets.randbelow(2**31))')}"
 OUTPUT_DIR="${OUTPUT_DIR:-${ROOT}/example/qdiffusion/outputs/edlm_head_eval_$(date +%Y%m%d_%H%M%S)}"
+NUM_CANDIDATES="${NUM_CANDIDATES:-2}"
+IMPORTANCE_START_T="${IMPORTANCE_START_T:-1.0}"
+IMPORTANCE_END_T="${IMPORTANCE_END_T:-0.0}"
+ENERGY_TEMPERATURE="${ENERGY_TEMPERATURE:-1.0}"
 
 case "${PROFILE}" in
   smoke)
@@ -27,7 +31,7 @@ case "${PROFILE}" in
     ;;
   paper)
     SEQUENCE_LENGTH="${SEQUENCE_LENGTH:-1024}"
-    STEPS="${STEPS:-1000}"
+    STEPS="${STEPS:-1024}"
     NUM_SAMPLES="${NUM_SAMPLES:-128}"
     BATCH_SIZE="${BATCH_SIZE:-4}"
     ;;
@@ -60,9 +64,10 @@ printf '%s\n' \
   "steps=${STEPS}" \
   "num_samples=${NUM_SAMPLES}" \
   "batch_size=${BATCH_SIZE}" \
-  "num_candidates=2" \
-  "importance_start_t=1.0" \
-  "importance_end_t=0.8" \
+  "num_candidates=${NUM_CANDIDATES}" \
+  "importance_start_t=${IMPORTANCE_START_T}" \
+  "importance_end_t=${IMPORTANCE_END_T}" \
+  "energy_temperature=${ENERGY_TEMPERATURE}" \
   > "${OUTPUT_DIR}/config.txt"
 
 log_stage() {
@@ -90,10 +95,10 @@ generate_head() {
     --steps "${STEPS}" \
     --num-samples "${NUM_SAMPLES}" \
     --batch-size "${BATCH_SIZE}" \
-    --num-candidates 2 \
-    --importance-start-t 1.0 \
-    --importance-end-t 0.8 \
-    --energy-temperature 1.0 \
+    --num-candidates "${NUM_CANDIDATES}" \
+    --importance-start-t "${IMPORTANCE_START_T}" \
+    --importance-end-t "${IMPORTANCE_END_T}" \
+    --energy-temperature "${ENERGY_TEMPERATURE}" \
     --seed "${SEED}" \
     --output "${output}" \
     "${extra_args[@]}" \
