@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import random
@@ -113,10 +114,20 @@ def evaluate_ranking(
     recovery_pairwise_total = 0
     recovery_regret_total = 0.0
     recovery_spread_total = 0.0
+    candidate_hasher = hashlib.sha256()
 
     with torch.no_grad():
         for batch in loader:
             outputs = generator.objective(batch)
+            candidate_array = (
+                outputs["candidate_tokens"]
+                .detach()
+                .cpu()
+                .contiguous()
+                .numpy()
+            )
+            candidate_hasher.update(str(candidate_array.shape).encode("ascii"))
+            candidate_hasher.update(candidate_array.tobytes())
             energies = outputs["candidate_energies"]
             teacher_nll = candidate_teacher_nll(
                 outputs["candidate_tokens"],
@@ -232,6 +243,7 @@ def evaluate_ranking(
     return {
         "num_examples": num_examples,
         "num_candidates": generator.config.num_candidates,
+        "candidate_sha256": candidate_hasher.hexdigest(),
         "ranking_top1_accuracy": top1_correct / denominator,
         "ranking_pairwise_accuracy": (
             pairwise_correct / pairwise_total

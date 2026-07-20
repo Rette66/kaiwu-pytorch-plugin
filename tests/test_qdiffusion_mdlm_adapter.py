@@ -987,6 +987,7 @@ def test_energy_ranking_diagnostic_compares_candidate_orderings(monkeypatch):
     assert metrics["oracle_teacher_nll"] == 0.0
     assert metrics["candidate_mean_teacher_nll"] == 1.0
     assert metrics["energy_margin"] == 2.0
+    assert len(metrics["candidate_sha256"]) == 64
 
 
 def test_ranking_uses_separate_backbone_for_trained_energy_encoder():
