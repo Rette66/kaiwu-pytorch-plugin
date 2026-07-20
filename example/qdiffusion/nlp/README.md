@@ -28,6 +28,12 @@ single-process sampling script emits 128 sequences per GPU/process, so this
 two-RTX-3090 workflow first uses 128 sequences as a variance-bearing
 reproduction estimate and records that sample-count difference explicitly.
 
+The Hugging Face backbone emits bfloat16 proposal probabilities, but the
+reference DDPM transition multiplies them by float32 timestep tensors. This
+promotion is intentional: running the 50K-way exponential race itself in
+bfloat16 collapses the generated text and produces a misleadingly tiny Gen
+PPL.
+
 Run a four-sample pipeline check first:
 
 ```bash

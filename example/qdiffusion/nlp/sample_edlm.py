@@ -41,12 +41,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--energy-checkpoint", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--sequence-length", type=int, default=1024)
-    parser.add_argument("--steps", type=int, default=1000)
+    parser.add_argument("--steps", type=int, default=1024)
     parser.add_argument("--num-samples", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-candidates", type=int)
     parser.add_argument("--importance-start-t", type=float, default=1.0)
-    parser.add_argument("--importance-end-t", type=float, default=0.8)
+    parser.add_argument("--importance-end-t", type=float, default=0.0)
     parser.add_argument("--energy-temperature", type=float, default=1.0)
     parser.add_argument(
         "--allow-bm-ablation",
@@ -152,7 +152,7 @@ def main() -> None:
     )
     # Model construction consumes a head-dependent number of random values.
     # Reset here so scalar and BM runs with the same seed receive the same
-    # proposal candidates and multinomial selection stream.
+    # proposal-candidate and importance-resampling streams.
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
 
