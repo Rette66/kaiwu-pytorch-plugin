@@ -549,6 +549,7 @@ def main() -> None:
             raw_energy_model,
             device_ids=[local_rank],
             output_device=local_rank,
+            find_unused_parameters=True,
         )
 
     # Head construction consumes a different number of random values for scalar
