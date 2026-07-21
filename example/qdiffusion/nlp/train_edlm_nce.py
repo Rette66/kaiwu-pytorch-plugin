@@ -295,6 +295,16 @@ def _save(
     )
 
 
+def file_sha256(path: Path) -> str:
+    """Hashes a checkpoint without loading the whole file into memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as checkpoint_file:
+        for chunk in iter(lambda: checkpoint_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def main() -> None:
     args = parse_args()
     if args.seed is None:
@@ -478,9 +488,9 @@ def main() -> None:
                 "resume_energy_checkpoint": str(
                     args.resume_energy_checkpoint.resolve()
                 ),
-                "resume_checkpoint_sha256": hashlib.sha256(
-                    args.resume_energy_checkpoint.read_bytes()
-                ).hexdigest(),
+                "resume_checkpoint_sha256": file_sha256(
+                    args.resume_energy_checkpoint
+                ),
                 "resume_weights": args.resume_weights,
                 "optimizer_state_resumed": False,
                 "scheduler_state_resumed": False,
