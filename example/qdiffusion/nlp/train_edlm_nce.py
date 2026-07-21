@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 import random
@@ -34,7 +35,11 @@ def _bootstrap_repo() -> None:
 
 _bootstrap_repo()
 
-from .checkpoint import save_energy_checkpoint  # noqa: E402
+from .checkpoint import (  # noqa: E402
+    load_energy_weights,
+    read_energy_checkpoint,
+    save_energy_checkpoint,
+)
 from .eval_gen_ppl import load_texts  # noqa: E402
 from .models import (  # noqa: E402
     MDLMBackbone,
@@ -50,6 +55,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", default="kuleshov-group/mdlm-owt")
     parser.add_argument("--tokenizer", default="gpt2")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--resume-energy-checkpoint", type=Path)
+    parser.add_argument(
+        "--resume-weights",
+        choices=("raw", "ema"),
+        default="raw",
+        help=(
+            "Weights used to initialize a resumed run. The prior EMA shadow "
+            "is restored independently when available."
+        ),
+    )
     parser.add_argument("--max-records", type=int)
     parser.add_argument("--sequence-length", type=int, default=1024)
     parser.add_argument("--micro-batch-size", type=int, default=1)
@@ -376,6 +391,26 @@ def main() -> None:
     if isinstance(energy_model, MDLMConditionedEnergyModel):
         energy_model.energy_bm.device = device
         energy_model.energy_bm.dtype = torch.float32
+    resume_checkpoint = None
+    initial_optimizer_step = 0
+    if args.resume_energy_checkpoint is not None:
+        resume_checkpoint = read_energy_checkpoint(
+            args.resume_energy_checkpoint,
+            map_location="cpu",
+        )
+        initial_optimizer_step = int(resume_checkpoint.get("epoch", 0))
+        if initial_optimizer_step < 0:
+            raise ValueError("Resume checkpoint epoch must be non-negative.")
+        if initial_optimizer_step >= args.max_steps:
+            raise ValueError(
+                "--max-steps must exceed the resume checkpoint epoch: "
+                f"epoch={initial_optimizer_step}, max_steps={args.max_steps}."
+            )
+        load_energy_weights(
+            SimpleNamespace(energy_model=energy_model),
+            resume_checkpoint,
+            use_ema=args.resume_weights == "ema",
+        )
     trainable = [
         parameter
         for parameter in energy_model.parameters()
@@ -391,11 +426,20 @@ def main() -> None:
     scheduler = LambdaLR(
         optimizer,
         lr_lambda=lambda step: constant_warmup_factor(
-            step,
+            step + initial_optimizer_step,
             warmup_steps=args.warmup_steps,
         ),
     )
     ema = EMATracker.create(energy_model, args.ema_decay)
+    if resume_checkpoint is not None and resume_checkpoint.get("ema_state_dict"):
+        for name, value in resume_checkpoint["ema_state_dict"].items():
+            if name in ema.shadow:
+                ema.shadow[name].copy_(
+                    value.to(
+                        device=ema.shadow[name].device,
+                        dtype=ema.shadow[name].dtype,
+                    )
+                )
     accumulation_steps = args.global_batch_size // args.micro_batch_size
     metadata: dict[str, object] = {
         "official_edlm_commit": (
@@ -425,7 +469,26 @@ def main() -> None:
         "energy_train_scope": "all",
         "data_order_seed": args.seed + 1,
         "training_rng_seed": args.seed + 2,
+        "initial_optimizer_step": initial_optimizer_step,
+        "target_optimizer_step": args.max_steps,
     }
+    if args.resume_energy_checkpoint is not None:
+        metadata.update(
+            {
+                "resume_energy_checkpoint": str(
+                    args.resume_energy_checkpoint.resolve()
+                ),
+                "resume_checkpoint_sha256": hashlib.sha256(
+                    args.resume_energy_checkpoint.read_bytes()
+                ).hexdigest(),
+                "resume_weights": args.resume_weights,
+                "optimizer_state_resumed": False,
+                "scheduler_state_resumed": False,
+                "ema_state_resumed": bool(
+                    resume_checkpoint.get("ema_state_dict")
+                ),
+            }
+        )
     if isinstance(energy_model, MDLMConditionedEnergyModel):
         metadata.update(energy_model.checkpoint_metadata())
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -445,7 +508,7 @@ def main() -> None:
     torch.cuda.manual_seed_all(args.seed + 2)
     optimizer.zero_grad(set_to_none=True)
     data_iterator = iter(loader)
-    optimizer_step = 0
+    optimizer_step = initial_optimizer_step
     micro_step = 0
     running: dict[str, float] = {}
     while optimizer_step < args.max_steps:
