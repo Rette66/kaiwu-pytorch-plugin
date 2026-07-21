@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import random
 import secrets
@@ -15,10 +17,12 @@ from typing import Iterable
 
 import numpy as np
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel
 from torch.nn import functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 
 
 def _bootstrap_repo() -> None:
@@ -254,12 +258,12 @@ def train_step(
         proposal_log_probabilities = proposal(noisy_tokens)
         negative_tokens = sample_proposal(proposal_log_probabilities)
     attention_mask = torch.ones_like(clean_tokens, dtype=torch.bool)
-    positive_energy = energy_model.score_conditioned(
+    positive_energy = energy_model(
         noisy_tokens,
         clean_tokens,
         attention_mask,
     )
-    negative_energy = energy_model.score_conditioned(
+    negative_energy = energy_model(
         noisy_tokens,
         negative_tokens,
         attention_mask,
@@ -330,11 +334,24 @@ def main() -> None:
     if args.bm_sa_size_limit <= 0:
         raise ValueError("--bm-sa-size-limit must be positive.")
 
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    distributed = world_size > 1
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    rank = int(os.environ.get("RANK", "0"))
+    if distributed:
+        dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(local_rank)
+    if args.global_batch_size % (args.micro_batch_size * world_size):
+        raise ValueError(
+            "--global-batch-size must be divisible by micro batch size "
+            "times WORLD_SIZE."
+        )
+
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
-    device = torch.device("cuda")
+    device = torch.device("cuda", local_rank)
 
     texts = load_texts(args.input, args.text_field)
     if args.max_records is not None:
@@ -359,10 +376,23 @@ def main() -> None:
         raise ValueError("The input produced no complete token blocks.")
     loader_generator = torch.Generator()
     loader_generator.manual_seed(args.seed + 1)
+    sampler = (
+        DistributedSampler(
+            blocks,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=True,
+            seed=args.seed + 1,
+            drop_last=True,
+        )
+        if distributed
+        else None
+    )
     loader = DataLoader(
         blocks,
         batch_size=args.micro_batch_size,
-        shuffle=True,
+        shuffle=sampler is None,
+        sampler=sampler,
         drop_last=True,
         generator=loader_generator,
     )
@@ -450,7 +480,9 @@ def main() -> None:
                         dtype=ema.shadow[name].dtype,
                     )
                 )
-    accumulation_steps = args.global_batch_size // args.micro_batch_size
+    accumulation_steps = args.global_batch_size // (
+        args.micro_batch_size * world_size
+    )
     metadata: dict[str, object] = {
         "official_edlm_commit": (
             "97e3146964f76aaa784fe523c673516efc7af0e0"
@@ -464,6 +496,7 @@ def main() -> None:
         "micro_batch_size": args.micro_batch_size,
         "global_batch_size": args.global_batch_size,
         "gradient_accumulation_steps": accumulation_steps,
+        "world_size": world_size,
         "learning_rate": args.learning_rate,
         "weight_decay": args.weight_decay,
         "warmup_steps": args.warmup_steps,
@@ -503,20 +536,33 @@ def main() -> None:
         metadata.update(energy_model.checkpoint_metadata())
     args.output.parent.mkdir(parents=True, exist_ok=True)
     config_path = args.output.with_suffix(args.output.suffix + ".config.json")
-    config_path.write_text(
-        json.dumps(metadata, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    print(json.dumps({"resolved_seed": args.seed, **metadata}))
+    if rank == 0:
+        config_path.write_text(
+            json.dumps(metadata, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(json.dumps({"resolved_seed": args.seed, **metadata}))
+
+    raw_energy_model = energy_model
+    if distributed:
+        energy_model = DistributedDataParallel(
+            raw_energy_model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+        )
 
     # Head construction consumes a different number of random values for scalar
     # and BM models. Reset the training stream so paired runs see identical
     # timesteps, corruptions, proposal negatives, and data order.
-    random.seed(args.seed + 2)
-    np.random.seed(args.seed + 2)
-    torch.manual_seed(args.seed + 2)
-    torch.cuda.manual_seed_all(args.seed + 2)
+    training_seed = args.seed + 2 + rank
+    random.seed(training_seed)
+    np.random.seed(training_seed)
+    torch.manual_seed(training_seed)
+    torch.cuda.manual_seed_all(training_seed)
     optimizer.zero_grad(set_to_none=True)
+    data_epoch = 0
+    if sampler is not None:
+        sampler.set_epoch(data_epoch)
     data_iterator = iter(loader)
     optimizer_step = initial_optimizer_step
     micro_step = 0
@@ -525,17 +571,27 @@ def main() -> None:
         try:
             clean_tokens = next(data_iterator)
         except StopIteration:
+            data_epoch += 1
+            if sampler is not None:
+                sampler.set_epoch(data_epoch)
             data_iterator = iter(loader)
             clean_tokens = next(data_iterator)
         clean_tokens = clean_tokens.to(device, non_blocking=True)
-        loss, metrics = train_step(
-            proposal,
-            energy_model,
-            clean_tokens,
-            sampling_eps=args.sampling_eps,
-            noise_eps=args.noise_eps,
+        sync_gradients = (micro_step + 1) % accumulation_steps == 0
+        sync_context = (
+            nullcontext()
+            if not distributed or sync_gradients
+            else energy_model.no_sync()
         )
-        (loss / accumulation_steps).backward()
+        with sync_context:
+            loss, metrics = train_step(
+                proposal,
+                energy_model,
+                clean_tokens,
+                sampling_eps=args.sampling_eps,
+                noise_eps=args.noise_eps,
+            )
+            (loss / accumulation_steps).backward()
         micro_step += 1
         for name, value in metrics.items():
             running[name] = running.get(name, 0.0) + value
@@ -549,7 +605,7 @@ def main() -> None:
         optimizer.step()
         scheduler.step()
         optimizer.zero_grad(set_to_none=True)
-        ema.update(energy_model)
+        ema.update(raw_energy_model)
         optimizer_step += 1
         averaged = {
             name: value / accumulation_steps
@@ -558,11 +614,20 @@ def main() -> None:
         averaged["gradient_norm"] = float(gradient_norm)
         averaged["learning_rate"] = float(scheduler.get_last_lr()[0])
         running.clear()
-        if optimizer_step % args.log_every == 0 or optimizer_step == 1:
+        if distributed:
+            metric_tensor = torch.tensor(
+                list(averaged.values()), device=device, dtype=torch.float64
+            )
+            dist.all_reduce(metric_tensor, op=dist.ReduceOp.SUM)
+            metric_tensor /= world_size
+            averaged = dict(zip(averaged, metric_tensor.tolist()))
+        if rank == 0 and (
+            optimizer_step % args.log_every == 0 or optimizer_step == 1
+        ):
             print(json.dumps({"step": optimizer_step, **averaged}), flush=True)
-        if optimizer_step % args.save_every == 0:
+        if rank == 0 and optimizer_step % args.save_every == 0:
             _save(
-                energy_model,
+                raw_energy_model,
                 ema,
                 args.output,
                 step=optimizer_step,
@@ -570,14 +635,17 @@ def main() -> None:
                 metadata=metadata,
             )
 
-    _save(
-        energy_model,
-        ema,
-        args.output,
-        step=optimizer_step,
-        metric=averaged["loss"],
-        metadata=metadata,
-    )
+    if rank == 0:
+        _save(
+            raw_energy_model,
+            ema,
+            args.output,
+            step=optimizer_step,
+            metric=averaged["loss"],
+            metadata=metadata,
+        )
+    if distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
