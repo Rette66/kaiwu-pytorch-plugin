@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="${ROOT:-/data/wwx/kaiwu-pytorch-plugin-nlp}"
 PY="${PY:-/data/wwx/envs/wwx_py310_4090/bin/python}"
 MODEL="${MODEL:-/data/wwx/models/mdlm}"
-TOKENIZER="${TOKENIZER:-/data/wwx/models/mdlm}"
+TOKENIZER="${TOKENIZER:-/data/wwx/models/gpt2-large}"
 INPUT="${INPUT:?set INPUT to the verified full-OWT token-block .bin}"
 OUTPUT_DIR="${OUTPUT_DIR:?set a new OUTPUT_DIR}"
 MAX_STEPS="${MAX_STEPS:-50000}"
