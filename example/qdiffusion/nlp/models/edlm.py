@@ -52,7 +52,8 @@ class EDLMConditionedFeatureEncoder(nn.Module):
         if self.pool_attention is None:
             return hidden_states.mean(dim=1)
 
-        scores = self.pool_attention(hidden_states).squeeze(-1).float()
+        attention_inputs = hidden_states.to(self.pool_attention.weight.dtype)
+        scores = self.pool_attention(attention_inputs).squeeze(-1).float()
         if attention_mask is not None:
             if attention_mask.shape != scores.shape:
                 raise ValueError(

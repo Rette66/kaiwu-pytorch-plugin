@@ -45,7 +45,10 @@ from example.qdiffusion.nlp.models.mdlm import (
     build_mdlm_token_spec,
 )
 from example.qdiffusion.nlp.models.bm import MDLMConditionedEnergyModel
-from example.qdiffusion.nlp.models.edlm import MDLMScalarEnergyModel
+from example.qdiffusion.nlp.models.edlm import (
+    EDLMConditionedFeatureEncoder,
+    MDLMScalarEnergyModel,
+)
 
 
 class FakeMDLM(nn.Module):
@@ -163,6 +166,25 @@ class EDLMFakeMDLM(FakeMDLM):
         self.backbone.rotary_emb = FakeRotary()
         self.backbone.blocks = nn.ModuleList([FakeConditionedBlock()])
         self.backbone.output_layer = FakeConditionedOutput(1, 6, 1)
+
+
+class BFloat16ConditionedEncoder:
+    hidden_size = 2
+
+    def build_conditioned_output_layer(self):
+        return nn.Identity()
+
+    def encode_conditioned_tokens(
+        self,
+        noisy_tokens,
+        candidate_tokens,
+        **kwargs,
+    ):
+        del noisy_tokens, candidate_tokens, kwargs
+        return torch.tensor(
+            [[[1.0, 2.0], [3.0, 4.0]]],
+            dtype=torch.bfloat16,
+        )
 
 
 class FakeTokenizer:
@@ -559,6 +581,25 @@ def test_bm_edlm_pair_supports_trainable_attention_pooling():
     assert pool_attention is not None
     assert pool_attention.weight.grad is not None
     assert energy_model.checkpoint_metadata()["pooling_mode"] == "attention"
+
+
+def test_attention_pooling_accepts_bfloat16_mdlm_features():
+    encoder = BFloat16ConditionedEncoder()
+    feature_encoder = EDLMConditionedFeatureEncoder(
+        encoder,
+        pooling_mode="attention",
+    )
+
+    features = feature_encoder(
+        encoder,
+        torch.ones(1, 2, dtype=torch.long),
+        torch.ones(1, 2, dtype=torch.long),
+        torch.ones(1, 2, dtype=torch.bool),
+    )
+    features.float().sum().backward()
+
+    assert features.dtype == torch.bfloat16
+    assert feature_encoder.pool_attention.weight.grad is not None
 
 
 def test_sampler_bm_energy_keeps_straight_through_visible_gradients():
