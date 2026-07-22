@@ -6,6 +6,7 @@ ROOT="${ROOT:-/data/wwx/kaiwu-pytorch-plugin-nlp}"
 PY="${PY:-/data/wwx/envs/wwx_py310_4090/bin/python}"
 MODEL="${MODEL:-/data/wwx/models/mdlm}"
 TOKENIZER="${TOKENIZER:-/data/wwx/models/gpt2-large}"
+TEACHER="${TEACHER:-/data/wwx/models/gpt2-large}"
 INPUT="${INPUT:?set INPUT to the verified full-OWT token-block .bin}"
 OUTPUT_DIR="${OUTPUT_DIR:?set a new OUTPUT_DIR}"
 MAX_STEPS="${MAX_STEPS:-50000}"
@@ -13,6 +14,7 @@ MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-4}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-512}"
 SAVE_EVERY="${SAVE_EVERY:-5000}"
 LOG_EVERY="${LOG_EVERY:-10}"
+RANKING_RECORDS="${RANKING_RECORDS:-128}"
 RESUME_CHECKPOINT="${RESUME_CHECKPOINT:-}"
 
 if [[ "${INPUT}" == *100k* ]]; then
@@ -80,6 +82,7 @@ fi
   printf 'max_steps=%s\n' "${MAX_STEPS}"
   printf 'save_every=%s\n' "${SAVE_EVERY}"
   printf 'resume_checkpoint=%s\n' "${RESUME_CHECKPOINT}"
+  printf 'heldout_ranking_records=%s\n' "${RANKING_RECORDS}"
 } > "${provenance}"
 
 on_exit() {
@@ -133,3 +136,41 @@ fi
   --require-complete-openwebtext \
   "${resume_args[@]}" \
   2>&1 | tee -a "${OUTPUT_DIR}/scalar.log"
+
+touch "${OUTPUT_DIR}/training_done"
+HELDOUT_INPUT="${HELDOUT_INPUT:-$("${PY}" - "${INPUT}" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+metadata = json.loads(
+    path.with_suffix(path.suffix + ".metadata.json").read_text()
+)
+print(metadata["heldout_output"])
+PY
+)}"
+
+for weights in raw ema; do
+  printf '%s stage=heldout_ranking_start weights=%s\n' \
+    "$(date --iso-8601=seconds)" "${weights}" \
+    | tee -a "${OUTPUT_DIR}/driver.log"
+  "${PY}" -m example.qdiffusion.nlp.eval_energy_ranking \
+    --input "${HELDOUT_INPUT}" \
+    --checkpoint "${MODEL}" \
+    --tokenizer "${TOKENIZER}" \
+    --energy-checkpoint "${OUTPUT_DIR}/scalar.pt" \
+    --teacher "${TEACHER}" \
+    --max-records "${RANKING_RECORDS}" \
+    --max-length 1024 \
+    --batch-size 1 \
+    --num-candidates 2 \
+    --energy-weights "${weights}" \
+    --seed "${SEED}" \
+    --output "${OUTPUT_DIR}/heldout_ranking_${weights}.json" \
+    > "${OUTPUT_DIR}/heldout_ranking_${weights}.log" 2>&1
+  printf '%s stage=heldout_ranking_done weights=%s\n' \
+    "$(date --iso-8601=seconds)" "${weights}" \
+    | tee -a "${OUTPUT_DIR}/driver.log"
+done
+touch "${OUTPUT_DIR}/ranking_done"
