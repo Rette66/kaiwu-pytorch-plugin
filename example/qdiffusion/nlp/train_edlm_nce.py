@@ -5,15 +5,18 @@ from __future__ import annotations
 import argparse
 from contextlib import nullcontext
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
 import random
 import secrets
+import shutil
 import sys
 from types import SimpleNamespace
-from typing import Iterable
+from typing import Any, Iterable
+import uuid
 
 import numpy as np
 import torch
@@ -22,7 +25,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.nn import functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader
 
 
 def _bootstrap_repo() -> None:
@@ -50,11 +53,17 @@ from .models import (  # noqa: E402
     MDLMConditionedEnergyModel,
     MDLMScalarEnergyModel,
 )
+from .token_blocks import (  # noqa: E402
+    ResumableDistributedSampler,
+    TokenBlockDataset,
+    metadata_path_for,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--input-metadata", type=Path)
     parser.add_argument("--text-field", default="text")
     parser.add_argument("--checkpoint", default="kuleshov-group/mdlm-owt")
     parser.add_argument("--tokenizer", default="gpt2")
@@ -98,6 +107,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int)
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--save-every", type=int, default=1000)
+    parser.add_argument("--heartbeat", type=Path)
+    parser.add_argument(
+        "--require-complete-openwebtext",
+        action="store_true",
+        help="Reject token blocks not built from all 80 OpenWebText shards.",
+    )
     return parser.parse_args()
 
 
@@ -115,9 +130,7 @@ def build_wrapped_blocks(
         raise ValueError("The tokenizer must define BOS and EOS token ids.")
     concatenated: list[int] = []
     for text in texts:
-        concatenated.extend(
-            tokenizer.encode(text, add_special_tokens=False)
-        )
+        concatenated.extend(tokenizer.encode(text, add_special_tokens=False))
         concatenated.append(int(tokenizer.eos_token_id))
     content_length = sequence_length - 2
     usable_length = len(concatenated) // content_length * content_length
@@ -170,9 +183,7 @@ def sample_proposal(log_probabilities: torch.Tensor) -> torch.Tensor:
     """Samples one independent proposal token at every sequence position."""
 
     flat = log_probabilities.exp().reshape(-1, log_probabilities.size(-1))
-    return torch.multinomial(flat.float(), 1).view(
-        *log_probabilities.shape[:-1]
-    )
+    return torch.multinomial(flat.float(), 1).view(*log_probabilities.shape[:-1])
 
 
 def binary_nce_loss(
@@ -181,9 +192,7 @@ def binary_nce_loss(
 ) -> torch.Tensor:
     """Returns EDLM's one-negative binary NCE loss."""
 
-    return (
-        F.softplus(positive_energy) + F.softplus(-negative_energy)
-    ).mean()
+    return (F.softplus(positive_energy) + F.softplus(-negative_energy)).mean()
 
 
 def constant_warmup_factor(step: int, *, warmup_steps: int) -> float:
@@ -288,15 +297,116 @@ def _save(
     step: int,
     metric: float,
     metadata: dict[str, object],
+    optimizer: AdamW,
+    scheduler: LambdaLR,
+    loader_generator: torch.Generator,
+    data_epoch: int,
+    data_sample_offset: int,
+    rank: int,
+    world_size: int,
+    device: torch.device,
 ) -> None:
-    save_energy_checkpoint(
-        SimpleNamespace(energy_model=energy_model),
-        path,
-        epoch=step,
-        metric=metric,
-        extra_metadata=metadata,
-        ema_state_dict=ema.state_dict(),
-    )
+    local_state = capture_rng_state(loader_generator, device=device)
+    local_state["data_epoch"] = data_epoch
+    local_state["data_sample_offset"] = data_sample_offset
+    if world_size > 1:
+        gathered_states: list[dict[str, Any] | None] = [None] * world_size
+        dist.all_gather_object(gathered_states, local_state)
+    else:
+        gathered_states = [local_state]
+    if rank == 0:
+        completed_states = [state for state in gathered_states if state is not None]
+        positions = {
+            (int(state["data_epoch"]), int(state["data_sample_offset"]))
+            for state in completed_states
+        }
+        if len(completed_states) != world_size or len(positions) != 1:
+            raise RuntimeError(
+                f"DDP ranks disagree on checkpoint data position: {sorted(positions)}."
+            )
+        training_state = {
+            "version": 1,
+            "optimizer_step": step,
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "data_epoch": data_epoch,
+            "data_sample_offset": data_sample_offset,
+            "per_rank_rng_state": completed_states,
+        }
+        snapshot = path.with_name(f"{path.stem}.step-{step:08d}{path.suffix}")
+        save_energy_checkpoint(
+            SimpleNamespace(energy_model=energy_model),
+            snapshot,
+            epoch=step,
+            metric=metric,
+            extra_metadata=metadata,
+            ema_state_dict=ema.state_dict(),
+            training_state=training_state,
+        )
+        publish_latest_checkpoint(snapshot, path)
+    if world_size > 1:
+        dist.barrier()
+
+
+def capture_rng_state(
+    loader_generator: torch.Generator,
+    *,
+    device: torch.device,
+) -> dict[str, Any]:
+    """Captures every RNG stream that can affect the next optimizer step."""
+
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.get_rng_state(),
+        "torch_cuda": torch.cuda.get_rng_state(device),
+        "loader_generator": loader_generator.get_state(),
+    }
+
+
+def restore_rng_state(
+    state: dict[str, Any],
+    loader_generator: torch.Generator,
+    *,
+    device: torch.device,
+) -> None:
+    """Restores a rank-local checkpoint RNG state exactly."""
+
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch_cpu"])
+    torch.cuda.set_rng_state(state["torch_cuda"], device=device)
+    loader_generator.set_state(state["loader_generator"])
+
+
+def publish_latest_checkpoint(snapshot: Path, latest: Path) -> None:
+    """Atomically points the stable checkpoint name at one step snapshot."""
+
+    temporary = latest.with_name(f".{latest.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        try:
+            os.link(snapshot, temporary)
+        except OSError:
+            shutil.copyfile(snapshot, temporary)
+        os.replace(temporary, latest)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_heartbeat(path: Path | None, payload: dict[str, Any]) -> None:
+    """Writes rank-zero long-run status without exposing partial JSON."""
+
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    payload = {
+        **payload,
+        "pid": os.getpid(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    temporary.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def file_sha256(path: Path) -> str:
@@ -316,9 +426,7 @@ def main() -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("EDLM-NCE training requires Linux/CUDA.")
     if args.global_batch_size % args.micro_batch_size:
-        raise ValueError(
-            "--global-batch-size must be divisible by --micro-batch-size."
-        )
+        raise ValueError("--global-batch-size must be divisible by --micro-batch-size.")
     if args.max_steps <= 0:
         raise ValueError("--max-steps must be positive.")
     if args.warmup_steps < 0:
@@ -353,9 +461,6 @@ def main() -> None:
     torch.cuda.manual_seed_all(args.seed)
     device = torch.device("cuda", local_rank)
 
-    texts = load_texts(args.input, args.text_field)
-    if args.max_records is not None:
-        texts = texts[: args.max_records]
     proposal = (
         MDLMBackbone.from_pretrained(
             args.checkpoint,
@@ -367,39 +472,63 @@ def main() -> None:
     )
     for parameter in proposal.parameters():
         parameter.requires_grad = False
-    blocks = build_wrapped_blocks(
-        texts,
-        proposal.tokenizer,
-        sequence_length=args.sequence_length,
-    )
+    input_metadata: dict[str, Any] = {}
+    if args.input.suffix.lower() == ".bin":
+        if args.max_records is not None:
+            raise ValueError("--max-records is not supported for token blocks.")
+        blocks = TokenBlockDataset(
+            args.input,
+            sequence_length=args.sequence_length,
+            metadata_path=(
+                args.input_metadata
+                if args.input_metadata is not None
+                else metadata_path_for(args.input)
+            ),
+        )
+        input_metadata = blocks.metadata
+        if args.require_complete_openwebtext:
+            source_shards = input_metadata.get("source_shards", [])
+            if (
+                not input_metadata.get("complete_openwebtext")
+                or int(input_metadata.get("expected_shards", 0)) != 80
+                or len(source_shards) != 80
+            ):
+                raise ValueError(
+                    "--require-complete-openwebtext needs verified metadata "
+                    "for all 80 source shards."
+                )
+    else:
+        if args.require_complete_openwebtext:
+            raise ValueError(
+                "--require-complete-openwebtext requires prepared .bin input."
+            )
+        texts = load_texts(args.input, args.text_field)
+        if args.max_records is not None:
+            texts = texts[: args.max_records]
+        blocks = build_wrapped_blocks(
+            texts,
+            proposal.tokenizer,
+            sequence_length=args.sequence_length,
+        )
     if not blocks:
         raise ValueError("The input produced no complete token blocks.")
     loader_generator = torch.Generator()
     loader_generator.manual_seed(args.seed + 1)
-    sampler = (
-        DistributedSampler(
-            blocks,
-            num_replicas=world_size,
-            rank=rank,
-            shuffle=True,
-            seed=args.seed + 1,
-            drop_last=True,
-        )
-        if distributed
-        else None
+    sampler = ResumableDistributedSampler(
+        blocks,
+        num_replicas=world_size,
+        rank=rank,
+        seed=args.seed + 1,
     )
     loader = DataLoader(
         blocks,
         batch_size=args.micro_batch_size,
-        shuffle=sampler is None,
         sampler=sampler,
         drop_last=True,
         generator=loader_generator,
     )
     if len(loader) == 0:
-        raise ValueError(
-            "The token-block dataset is smaller than --micro-batch-size."
-        )
+        raise ValueError("The token-block dataset is smaller than --micro-batch-size.")
 
     energy_backbone = (
         MDLMBackbone.from_pretrained(
@@ -432,13 +561,19 @@ def main() -> None:
         energy_model.energy_bm.device = device
         energy_model.energy_bm.dtype = torch.float32
     resume_checkpoint = None
+    resume_training_state = None
     initial_optimizer_step = 0
     if args.resume_energy_checkpoint is not None:
         resume_checkpoint = read_energy_checkpoint(
             args.resume_energy_checkpoint,
             map_location="cpu",
         )
-        initial_optimizer_step = int(resume_checkpoint.get("epoch", 0))
+        resume_training_state = resume_checkpoint.get("training_state")
+        initial_optimizer_step = int(
+            resume_training_state.get("optimizer_step", 0)
+            if resume_training_state is not None
+            else resume_checkpoint.get("epoch", 0)
+        )
         if initial_optimizer_step < 0:
             raise ValueError("Resume checkpoint epoch must be non-negative.")
         if initial_optimizer_step >= args.max_steps:
@@ -449,12 +584,15 @@ def main() -> None:
         load_energy_weights(
             SimpleNamespace(energy_model=energy_model),
             resume_checkpoint,
-            use_ema=args.resume_weights == "ema",
+            use_ema=(args.resume_weights == "ema" and resume_training_state is None),
         )
+        if resume_training_state is not None and args.resume_weights != "raw":
+            raise ValueError(
+                "A full-state resume must continue from raw weights; EMA is "
+                "restored as its independent shadow."
+            )
     trainable = [
-        parameter
-        for parameter in energy_model.parameters()
-        if parameter.requires_grad
+        parameter for parameter in energy_model.parameters() if parameter.requires_grad
     ]
     optimizer = AdamW(
         trainable,
@@ -466,7 +604,11 @@ def main() -> None:
     scheduler = LambdaLR(
         optimizer,
         lr_lambda=lambda step: constant_warmup_factor(
-            step + initial_optimizer_step,
+            (
+                step
+                if resume_training_state is not None
+                else step + initial_optimizer_step
+            ),
             warmup_steps=args.warmup_steps,
         ),
     )
@@ -480,13 +622,12 @@ def main() -> None:
                         dtype=ema.shadow[name].dtype,
                     )
                 )
-    accumulation_steps = args.global_batch_size // (
-        args.micro_batch_size * world_size
-    )
+    if resume_training_state is not None:
+        optimizer.load_state_dict(resume_training_state["optimizer_state_dict"])
+        scheduler.load_state_dict(resume_training_state["scheduler_state_dict"])
+    accumulation_steps = args.global_batch_size // (args.micro_batch_size * world_size)
     metadata: dict[str, object] = {
-        "official_edlm_commit": (
-            "97e3146964f76aaa784fe523c673516efc7af0e0"
-        ),
+        "official_edlm_commit": ("97e3146964f76aaa784fe523c673516efc7af0e0"),
         "mdlm_checkpoint": args.checkpoint,
         "energy_type": args.energy_type,
         "feature_mode": "edlm_pair",
@@ -507,33 +648,83 @@ def main() -> None:
         "sampling_eps": args.sampling_eps,
         "noise_eps": args.noise_eps,
         "seed": args.seed,
-        "num_records": len(texts),
         "num_blocks": len(blocks),
+        "input": str(args.input.resolve()),
+        "input_format": (
+            "token_blocks" if isinstance(blocks, TokenBlockDataset) else "text"
+        ),
         "energy_train_scope": "all",
         "data_order_seed": args.seed + 1,
         "training_rng_seed": args.seed + 2,
         "initial_optimizer_step": initial_optimizer_step,
         "target_optimizer_step": args.max_steps,
     }
+    if isinstance(blocks, TokenBlockDataset):
+        metadata.update(
+            {
+                "input_metadata": str(blocks.metadata_path.resolve()),
+                "input_sha256": input_metadata.get("output_sha256"),
+                "complete_openwebtext": bool(
+                    input_metadata.get("complete_openwebtext")
+                ),
+                "openwebtext_revision": input_metadata.get("dataset_revision"),
+                "openwebtext_source_shards": len(
+                    input_metadata.get("source_shards", [])
+                ),
+                "heldout_seed": input_metadata.get("heldout_seed"),
+                "heldout_modulus": input_metadata.get("heldout_modulus"),
+                "heldout_records": input_metadata.get("heldout_records"),
+                "heldout_output": input_metadata.get("heldout_output"),
+                "heldout_sha256": input_metadata.get("heldout_sha256"),
+            }
+        )
+    else:
+        metadata["num_records"] = len(texts)
     if args.resume_energy_checkpoint is not None:
         metadata.update(
             {
                 "resume_energy_checkpoint": str(
                     args.resume_energy_checkpoint.resolve()
                 ),
-                "resume_checkpoint_sha256": file_sha256(
-                    args.resume_energy_checkpoint
-                ),
+                "resume_checkpoint_sha256": file_sha256(args.resume_energy_checkpoint),
                 "resume_weights": args.resume_weights,
-                "optimizer_state_resumed": False,
-                "scheduler_state_resumed": False,
-                "ema_state_resumed": bool(
-                    resume_checkpoint.get("ema_state_dict")
-                ),
+                "optimizer_state_resumed": bool(resume_training_state),
+                "scheduler_state_resumed": bool(resume_training_state),
+                "ema_state_resumed": bool(resume_checkpoint.get("ema_state_dict")),
+                "rng_state_resumed": bool(resume_training_state),
+                "data_state_resumed": bool(resume_training_state),
             }
         )
     if isinstance(energy_model, MDLMConditionedEnergyModel):
         metadata.update(energy_model.checkpoint_metadata())
+    if resume_checkpoint is not None:
+        previous_metadata = resume_checkpoint["metadata"]
+        for key in (
+            "mdlm_checkpoint",
+            "energy_type",
+            "feature_mode",
+            "training_objective",
+            "num_proposal_negatives",
+            "sequence_length",
+            "micro_batch_size",
+            "global_batch_size",
+            "world_size",
+            "learning_rate",
+            "weight_decay",
+            "warmup_steps",
+            "gradient_clip_norm",
+            "ema_decay",
+            "sampling_eps",
+            "noise_eps",
+            "seed",
+            "input_sha256",
+        ):
+            if key in previous_metadata and previous_metadata[key] != metadata.get(key):
+                raise ValueError(
+                    "Resume configuration mismatch for "
+                    f"{key}: checkpoint={previous_metadata[key]!r}, "
+                    f"current={metadata.get(key)!r}."
+                )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     config_path = args.output.with_suffix(args.output.suffix + ".config.json")
     if rank == 0:
@@ -542,6 +733,15 @@ def main() -> None:
             encoding="utf-8",
         )
         print(json.dumps({"resolved_seed": args.seed, **metadata}))
+        write_heartbeat(
+            args.heartbeat,
+            {
+                "status": "starting",
+                "optimizer_step": initial_optimizer_step,
+                "target_optimizer_step": args.max_steps,
+                "seed": args.seed,
+            },
+        )
 
     raw_energy_model = energy_model
     if distributed:
@@ -556,15 +756,36 @@ def main() -> None:
     # and BM models. Reset the training stream so paired runs see identical
     # timesteps, corruptions, proposal negatives, and data order.
     training_seed = args.seed + 2 + rank
-    random.seed(training_seed)
-    np.random.seed(training_seed)
-    torch.manual_seed(training_seed)
-    torch.cuda.manual_seed_all(training_seed)
+    if resume_training_state is None:
+        random.seed(training_seed)
+        np.random.seed(training_seed)
+        torch.manual_seed(training_seed)
+        torch.cuda.manual_seed_all(training_seed)
     optimizer.zero_grad(set_to_none=True)
-    data_epoch = 0
-    if sampler is not None:
-        sampler.set_epoch(data_epoch)
+    data_epoch = int(
+        resume_training_state.get("data_epoch", 0)
+        if resume_training_state is not None
+        else 0
+    )
+    data_sample_offset = int(
+        resume_training_state.get("data_sample_offset", 0)
+        if resume_training_state is not None
+        else 0
+    )
+    sampler.set_epoch(data_epoch, start_index=data_sample_offset)
     data_iterator = iter(loader)
+    if resume_training_state is not None:
+        rank_rng_states = resume_training_state["per_rank_rng_state"]
+        if len(rank_rng_states) != world_size:
+            raise ValueError(
+                "Resume checkpoint world size does not match current DDP: "
+                f"checkpoint={len(rank_rng_states)}, current={world_size}."
+            )
+        restore_rng_state(
+            rank_rng_states[rank],
+            loader_generator,
+            device=device,
+        )
     optimizer_step = initial_optimizer_step
     micro_step = 0
     running: dict[str, float] = {}
@@ -573,10 +794,11 @@ def main() -> None:
             clean_tokens = next(data_iterator)
         except StopIteration:
             data_epoch += 1
-            if sampler is not None:
-                sampler.set_epoch(data_epoch)
+            data_sample_offset = 0
+            sampler.set_epoch(data_epoch, start_index=0)
             data_iterator = iter(loader)
             clean_tokens = next(data_iterator)
+        data_sample_offset += clean_tokens.size(0)
         clean_tokens = clean_tokens.to(device, non_blocking=True)
         sync_gradients = (micro_step + 1) % accumulation_steps == 0
         sync_context = (
@@ -608,10 +830,7 @@ def main() -> None:
         optimizer.zero_grad(set_to_none=True)
         ema.update(raw_energy_model)
         optimizer_step += 1
-        averaged = {
-            name: value / accumulation_steps
-            for name, value in running.items()
-        }
+        averaged = {name: value / accumulation_steps for name, value in running.items()}
         averaged["gradient_norm"] = float(gradient_norm)
         averaged["learning_rate"] = float(scheduler.get_last_lr()[0])
         running.clear()
@@ -622,11 +841,20 @@ def main() -> None:
             dist.all_reduce(metric_tensor, op=dist.ReduceOp.SUM)
             metric_tensor /= world_size
             averaged = dict(zip(averaged, metric_tensor.tolist()))
-        if rank == 0 and (
-            optimizer_step % args.log_every == 0 or optimizer_step == 1
-        ):
+        if rank == 0 and (optimizer_step % args.log_every == 0 or optimizer_step == 1):
             print(json.dumps({"step": optimizer_step, **averaged}), flush=True)
-        if rank == 0 and optimizer_step % args.save_every == 0:
+            write_heartbeat(
+                args.heartbeat,
+                {
+                    "status": "training",
+                    "optimizer_step": optimizer_step,
+                    "target_optimizer_step": args.max_steps,
+                    "data_epoch": data_epoch,
+                    "data_sample_offset": data_sample_offset,
+                    **averaged,
+                },
+            )
+        if optimizer_step % args.save_every == 0:
             _save(
                 raw_energy_model,
                 ema,
@@ -634,9 +862,32 @@ def main() -> None:
                 step=optimizer_step,
                 metric=averaged["loss"],
                 metadata=metadata,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                loader_generator=loader_generator,
+                data_epoch=data_epoch,
+                data_sample_offset=data_sample_offset,
+                rank=rank,
+                world_size=world_size,
+                device=device,
             )
+            if rank == 0:
+                write_heartbeat(
+                    args.heartbeat,
+                    {
+                        "status": "checkpoint_saved",
+                        "optimizer_step": optimizer_step,
+                        "target_optimizer_step": args.max_steps,
+                        "checkpoint": str(
+                            args.output.with_name(
+                                f"{args.output.stem}.step-{optimizer_step:08d}"
+                                f"{args.output.suffix}"
+                            ).resolve()
+                        ),
+                    },
+                )
 
-    if rank == 0:
+    if optimizer_step % args.save_every:
         _save(
             raw_energy_model,
             ema,
@@ -644,6 +895,24 @@ def main() -> None:
             step=optimizer_step,
             metric=averaged["loss"],
             metadata=metadata,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            loader_generator=loader_generator,
+            data_epoch=data_epoch,
+            data_sample_offset=data_sample_offset,
+            rank=rank,
+            world_size=world_size,
+            device=device,
+        )
+    if rank == 0:
+        write_heartbeat(
+            args.heartbeat,
+            {
+                "status": "all_done",
+                "optimizer_step": optimizer_step,
+                "target_optimizer_step": args.max_steps,
+                "checkpoint": str(args.output.resolve()),
+            },
         )
     if distributed:
         dist.destroy_process_group()

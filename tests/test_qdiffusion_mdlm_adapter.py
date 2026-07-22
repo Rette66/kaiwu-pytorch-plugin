@@ -1,5 +1,7 @@
 """Offline tests for the MDLM adapter and NLP evaluation helpers."""
 
+import json
+
 from types import SimpleNamespace
 
 import numpy as np
@@ -33,6 +35,12 @@ from example.qdiffusion.nlp.train_edlm_nce import (
     constant_warmup_factor,
     corrupt_tokens,
     sample_antithetic_times,
+)
+from example.qdiffusion.nlp.token_blocks import (
+    ResumableDistributedSampler,
+    TOKEN_BLOCK_FORMAT,
+    TokenBlockDataset,
+    metadata_path_for,
 )
 from example.qdiffusion.nlp.builder import build_mdlm_qdiffusion
 from example.qdiffusion.nlp.checkpoint import (
@@ -104,9 +112,7 @@ class LayeredFakeMDLM(FakeMDLM):
     def __init__(self) -> None:
         super().__init__()
         self.backbone = nn.Module()
-        self.backbone.blocks = nn.ModuleList(
-            [nn.Linear(1, 1) for _ in range(3)]
-        )
+        self.backbone.blocks = nn.ModuleList([nn.Linear(1, 1) for _ in range(3)])
 
 
 class FakeVocabEmbed(nn.Module):
@@ -371,9 +377,7 @@ def test_edlm_antithetic_times_cover_stratified_intervals():
         sampling_eps=1e-3,
     )
 
-    interval_indices = torch.floor(
-        (timesteps - 1e-3) / (1.0 - 1e-3) * 4
-    ).long()
+    interval_indices = torch.floor((timesteps - 1e-3) / (1.0 - 1e-3) * 4).long()
     assert torch.equal(interval_indices, torch.arange(4))
 
 
@@ -407,10 +411,53 @@ def test_edlm_constant_warmup_matches_official_schedule():
     assert constant_warmup_factor(0, warmup_steps=0) == 1.0
 
 
-def test_edlm_token_entropy_matches_reference_definition():
-    entropy = compute_mean_token_entropy(
-        [[1, 1, 2, 2], [3, 3, 3, 3]]
+def test_token_block_dataset_validates_sidecar_and_reads_uint16(tmp_path):
+    block_path = tmp_path / "tiny.bin"
+    source = np.asarray([[1, 2, 3, 4], [5, 6, 7, 8]], dtype="<u2")
+    block_path.write_bytes(source.tobytes())
+    metadata_path_for(block_path).write_text(
+        json.dumps(
+            {
+                "format": TOKEN_BLOCK_FORMAT,
+                "dtype": "uint16-le",
+                "sequence_length": 4,
+                "num_blocks": 2,
+            }
+        ),
+        encoding="utf-8",
     )
+
+    dataset = TokenBlockDataset(block_path, sequence_length=4)
+
+    assert len(dataset) == 2
+    assert torch.equal(dataset[1], torch.tensor([5, 6, 7, 8]))
+
+
+def test_resumable_distributed_sampler_continues_exact_epoch_order():
+    dataset = list(range(13))
+    sampler = ResumableDistributedSampler(
+        dataset,
+        num_replicas=2,
+        rank=1,
+        seed=123,
+    )
+    sampler.set_epoch(4)
+    full_order = list(sampler)
+
+    resumed = ResumableDistributedSampler(
+        dataset,
+        num_replicas=2,
+        rank=1,
+        seed=123,
+    )
+    resumed.set_epoch(4, start_index=3)
+
+    assert list(resumed) == full_order[3:]
+    assert len(resumed) == len(full_order) - 3
+
+
+def test_edlm_token_entropy_matches_reference_definition():
+    entropy = compute_mean_token_entropy([[1, 1, 2, 2], [3, 3, 3, 3]])
 
     assert entropy == pytest.approx(0.5)
 
@@ -572,9 +619,7 @@ def test_mdlm_candidate_scoring_encodes_noisy_context_once():
         sampler=object(),
     )
     noisy_tokens = torch.tensor([[1, 5, 5]])
-    candidate_tokens = torch.tensor(
-        [[[2, 3, 0], [4, 2, 0], [3, 4, 2]]]
-    )
+    candidate_tokens = torch.tensor([[[2, 3, 0], [4, 2, 0], [3, 4, 2]]])
     attention_mask = candidate_tokens.ne(0)
 
     scores = energy_model.score_candidates_conditioned(
@@ -629,9 +674,7 @@ def test_mdlm_visible_transform_modes(mode, expected):
         visible_transform=mode,
     )
 
-    visible = energy_model.discretize_visible_state(
-        torch.tensor([[0.0, 2.0]])
-    )
+    visible = energy_model.discretize_visible_state(torch.tensor([[0.0, 2.0]]))
 
     assert torch.allclose(visible, expected, atol=1e-6)
 
@@ -723,9 +766,7 @@ def test_scalar_energy_checkpoint_round_trip(tmp_path):
         original_weight,
     )
     load_energy_weights(scalar, checkpoint)
-    assert torch.count_nonzero(
-        scalar.energy_model.energy_head[2].weight
-    ).item() == 0
+    assert torch.count_nonzero(scalar.energy_model.energy_head[2].weight).item() == 0
 
 
 def test_builder_exposes_proposal_resampling_controls():
@@ -869,9 +910,7 @@ def test_prompt_suite_and_text_quality_metrics(tmp_path):
     )
 
     prompts = load_prompts(None, prompts_path)
-    metrics = compute_text_quality(
-        ["alpha beta alpha beta", "gamma delta"]
-    )
+    metrics = compute_text_quality(["alpha beta alpha beta", "gamma delta"])
 
     assert prompts == ["First prompt", "Second prompt"]
     assert metrics["num_sequences"] == 2
@@ -914,9 +953,7 @@ def test_recovery_ranking_prefers_candidates_matching_masked_targets():
     outputs = {
         "targets": torch.tensor([[1, 2, 3, 4]]),
         "loss_mask": torch.tensor([[False, True, True, False]]),
-        "candidate_tokens": torch.tensor(
-            [[[1, 2, 3, 4], [1, 2, 0, 4], [1, 0, 0, 4]]]
-        ),
+        "candidate_tokens": torch.tensor([[[1, 2, 3, 4], [1, 2, 0, 4], [1, 0, 0, 4]]]),
     }
 
     scores = candidate_recovery_scores(outputs)
@@ -959,9 +996,7 @@ def test_energy_ranking_diagnostic_compares_candidate_orderings(monkeypatch):
                 "candidate_tokens": torch.zeros(2, 3, 2, dtype=torch.long),
                 "targets": torch.zeros(2, 2, dtype=torch.long),
                 "loss_mask": torch.ones(2, 2, dtype=torch.bool),
-                "candidate_energies": torch.tensor(
-                    [[0.0, 1.0, 2.0], [2.0, 1.0, 0.0]]
-                ),
+                "candidate_energies": torch.tensor([[0.0, 1.0, 2.0], [2.0, 1.0, 0.0]]),
                 "positive_energy_mean": torch.tensor(-1.0),
                 "negative_energy_mean": torch.tensor(1.0),
             }
@@ -969,9 +1004,7 @@ def test_energy_ranking_diagnostic_compares_candidate_orderings(monkeypatch):
     monkeypatch.setattr(
         eval_energy_ranking,
         "candidate_teacher_nll",
-        lambda *args, **kwargs: torch.tensor(
-            [[0.0, 1.0, 2.0], [0.0, 1.0, 2.0]]
-        ),
+        lambda *args, **kwargs: torch.tensor([[0.0, 1.0, 2.0], [0.0, 1.0, 2.0]]),
     )
 
     metrics = eval_energy_ranking.evaluate_ranking(

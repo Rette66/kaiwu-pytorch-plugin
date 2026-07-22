@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
+import uuid
 
 import torch
 
@@ -16,6 +18,7 @@ def save_energy_checkpoint(
     metric: float,
     extra_metadata: dict[str, Any] | None = None,
     ema_state_dict: dict[str, torch.Tensor] | None = None,
+    training_state: dict[str, Any] | None = None,
 ) -> None:
     """Saves compact energy weights without duplicating frozen MDLM weights."""
 
@@ -43,10 +46,16 @@ def save_energy_checkpoint(
     }
     if ema_state_dict is not None:
         payload["ema_state_dict"] = {
-            name: value.detach().cpu()
-            for name, value in ema_state_dict.items()
+            name: value.detach().cpu() for name, value in ema_state_dict.items()
         }
-    torch.save(payload, path)
+    if training_state is not None:
+        payload["training_state"] = training_state
+    temporary_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        torch.save(payload, temporary_path)
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def read_energy_checkpoint(
