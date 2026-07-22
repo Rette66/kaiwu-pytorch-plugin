@@ -71,12 +71,20 @@ class MDLMConditionedEnergyModel(EnergyModel):
         scoring_mode: str = "sampler",
         visible_transform: str = "sigmoid",
         feature_mode: str = "pooled_pair",
+        pooling_mode: str = "mean",
     ) -> None:
         if feature_mode not in {"pooled_pair", "edlm_pair"}:
             raise ValueError(
                 "feature_mode must be 'pooled_pair' or 'edlm_pair'."
             )
         self.feature_mode = feature_mode
+        if pooling_mode not in {"mean", "attention"}:
+            raise ValueError("pooling_mode must be 'mean' or 'attention'.")
+        if feature_mode != "edlm_pair" and pooling_mode != "mean":
+            raise ValueError(
+                "attention pooling is only supported with feature_mode='edlm_pair'."
+            )
+        self.pooling_mode = pooling_mode
         self.sampler_type = sampler_type
         self.sampler_kwargs = dict(sampler_kwargs or {})
         if scoring_mode not in {"sampler", "exact"}:
@@ -97,7 +105,10 @@ class MDLMConditionedEnergyModel(EnergyModel):
         )
         self.encoder = encoder
         self.conditioned_encoder = (
-            EDLMConditionedFeatureEncoder(encoder)
+            EDLMConditionedFeatureEncoder(
+                encoder,
+                pooling_mode=pooling_mode,
+            )
             if feature_mode == "edlm_pair"
             else None
         )
@@ -205,6 +216,7 @@ class MDLMConditionedEnergyModel(EnergyModel):
                 self.encoder,
                 noisy_tokens,
                 candidate_tokens,
+                attention_mask,
             )
         noisy_hidden = self.encoder.encode_tokens(
             noisy_tokens,
@@ -258,6 +270,9 @@ class MDLMConditionedEnergyModel(EnergyModel):
         """Scores candidate sets while encoding each noisy context once."""
 
         batch_size, num_candidates, seq_len = candidate_tokens.shape
+        flat_attention_mask = attention_mask.reshape(
+            batch_size * num_candidates, seq_len
+        )
         if self.conditioned_encoder is not None:
             flat_noisy_tokens = (
                 noisy_tokens.unsqueeze(1)
@@ -272,6 +287,7 @@ class MDLMConditionedEnergyModel(EnergyModel):
                 self.encoder,
                 flat_noisy_tokens,
                 flat_candidate_tokens,
+                flat_attention_mask,
             )
             visible_logits = self.feature_projector(
                 features.to(self.feature_projector.weight.dtype)
@@ -279,9 +295,6 @@ class MDLMConditionedEnergyModel(EnergyModel):
             energy = self.score_visible_logits(visible_logits)
             return energy.view(batch_size, num_candidates)
 
-        flat_attention_mask = attention_mask.reshape(
-            batch_size * num_candidates, seq_len
-        )
         noisy_hidden = self.encoder.encode_tokens(noisy_tokens)
         noisy_hidden = (
             noisy_hidden.unsqueeze(1)
@@ -321,6 +334,7 @@ class MDLMConditionedEnergyModel(EnergyModel):
             "scoring_mode": self.scoring_mode,
             "visible_transform": self.visible_transform.mode,
             "feature_mode": self.feature_mode,
+            "pooling_mode": self.pooling_mode,
         }
 
     def compact_state_dict(self) -> dict[str, Any]:

@@ -121,6 +121,25 @@ bash example/qdiffusion/nlp/run_edlm_head_ablation.sh
 The script records separate logs, checkpoints, and five-second GPU-memory
 traces for the scalar and BM runs.
 
+The historical internal implementation used a larger `BM(V=768,H=256)` and
+a learned attention pool instead of the controlled mean pool. Reproduce that
+structure as an explicit BM-only ablation without changing the defaults:
+
+```bash
+python -m example.qdiffusion.nlp.train_edlm_nce \
+  --energy-type bm \
+  --energy-pooling attention \
+  --bm-num-visible 768 \
+  --bm-num-hidden 256 \
+  ...
+```
+
+The checkpoint records `pooling_mode`; sampling and ranking evaluation restore
+it automatically. This only transfers the historical representation choice.
+The old stochastic RBM training objective is not used as a candidate score,
+because it includes a newly sampled negative phase and is therefore not a
+deterministic per-candidate energy.
+
 After training, `run_edlm_head_eval.sh` evaluates the two checkpoints
 sequentially with the same post-construction RNG reset, K=2 proposal pool,
 importance window, sampling temperature, sequence length, steps, batch size,

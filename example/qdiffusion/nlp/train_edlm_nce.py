@@ -86,6 +86,12 @@ def parse_args() -> argparse.Namespace:
         choices=("scalar", "bm"),
         default="scalar",
     )
+    parser.add_argument(
+        "--energy-pooling",
+        choices=("mean", "attention"),
+        default="mean",
+        help="Pooling used by the joint EDLM pair encoder for BM energy.",
+    )
     parser.add_argument("--bm-num-visible", type=int, default=64)
     parser.add_argument("--bm-num-hidden", type=int, default=32)
     parser.add_argument(
@@ -329,6 +335,8 @@ def main() -> None:
         raise ValueError("--log-every and --save-every must be positive.")
     if args.bm_num_visible <= 0 or args.bm_num_hidden <= 0:
         raise ValueError("BM visible and hidden sizes must be positive.")
+    if args.energy_type != "bm" and args.energy_pooling != "mean":
+        raise ValueError("Attention pooling is only available for BM energy.")
     if not 0.0 < args.bm_sa_alpha < 1.0:
         raise ValueError("--bm-sa-alpha must be in (0, 1).")
     if args.bm_sa_size_limit <= 0:
@@ -426,6 +434,7 @@ def main() -> None:
             scoring_mode="sampler",
             visible_transform=args.bm_visible_transform,
             feature_mode="edlm_pair",
+            pooling_mode=args.energy_pooling,
         )
     energy_model = energy_model.to(device).train()
     if isinstance(energy_model, MDLMConditionedEnergyModel):
@@ -490,6 +499,7 @@ def main() -> None:
         "mdlm_checkpoint": args.checkpoint,
         "energy_type": args.energy_type,
         "feature_mode": "edlm_pair",
+        "pooling_mode": args.energy_pooling,
         "training_objective": "binary_nce",
         "num_proposal_negatives": 1,
         "sequence_length": args.sequence_length,

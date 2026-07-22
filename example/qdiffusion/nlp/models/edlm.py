@@ -11,23 +11,37 @@ from .mdlm import MDLMBackbone
 
 
 class EDLMConditionedFeatureEncoder(nn.Module):
-    """Matches the official EDLM-NCE ``(x_t, x_0)`` feature path."""
+    """Encodes an EDLM ``(x_t, x_0)`` pair and pools token features."""
 
-    def __init__(self, encoder: MDLMBackbone) -> None:
+    def __init__(
+        self,
+        encoder: MDLMBackbone,
+        *,
+        pooling_mode: str = "mean",
+    ) -> None:
         super().__init__()
+        if pooling_mode not in {"mean", "attention"}:
+            raise ValueError("pooling_mode must be 'mean' or 'attention'.")
+        self.pooling_mode = pooling_mode
         self.input_projection = nn.Linear(
             2 * encoder.hidden_size,
             encoder.hidden_size,
         )
         self.output_layer = encoder.build_conditioned_output_layer()
+        self.pool_attention = (
+            nn.Linear(encoder.hidden_size, 1, bias=False)
+            if pooling_mode == "attention"
+            else None
+        )
 
     def forward(
         self,
         encoder: MDLMBackbone,
         noisy_tokens: torch.Tensor,
         candidate_tokens: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Returns the official full-sequence mean-pooled representation."""
+        """Returns a pooled full-sequence representation."""
 
         hidden_states = encoder.encode_conditioned_tokens(
             noisy_tokens,
@@ -35,7 +49,21 @@ class EDLMConditionedFeatureEncoder(nn.Module):
             input_projection=self.input_projection,
             output_layer=self.output_layer,
         )
-        return hidden_states.mean(dim=1)
+        if self.pool_attention is None:
+            return hidden_states.mean(dim=1)
+
+        scores = self.pool_attention(hidden_states).squeeze(-1).float()
+        if attention_mask is not None:
+            if attention_mask.shape != scores.shape:
+                raise ValueError(
+                    "attention_mask must match the conditioned sequence shape."
+                )
+            valid_tokens = attention_mask.bool()
+            if not valid_tokens.any(dim=1).all():
+                raise ValueError("Every sequence must contain a valid token.")
+            scores = scores.masked_fill(~valid_tokens, -torch.inf)
+        weights = torch.softmax(scores, dim=1).to(hidden_states.dtype)
+        return (hidden_states * weights.unsqueeze(-1)).sum(dim=1)
 
 
 class MDLMScalarEnergyModel(EnergyModel):
@@ -62,11 +90,11 @@ class MDLMScalarEnergyModel(EnergyModel):
     ) -> torch.Tensor:
         """Scores one full candidate sequence with a scalar residual energy."""
 
-        del attention_mask
         features = self.conditioned_encoder(
             self.encoder,
             noisy_tokens,
             candidate_tokens,
+            attention_mask,
         )
         return self.energy_head(features.to(self.energy_head[0].weight.dtype))
 
@@ -78,7 +106,6 @@ class MDLMScalarEnergyModel(EnergyModel):
     ) -> torch.Tensor:
         """Scores an EDLM importance-sampling candidate pool in parallel."""
 
-        del attention_mask
         batch_size, num_candidates, seq_len = candidate_tokens.shape
         flat_noisy_tokens = (
             noisy_tokens.unsqueeze(1)
@@ -89,10 +116,14 @@ class MDLMScalarEnergyModel(EnergyModel):
             batch_size * num_candidates,
             seq_len,
         )
+        flat_attention_mask = attention_mask.reshape(
+            batch_size * num_candidates,
+            seq_len,
+        )
         energy = self.score_conditioned(
             flat_noisy_tokens,
             flat_candidate_tokens,
-            torch.empty(0, device=candidate_tokens.device),
+            flat_attention_mask,
         )
         return energy.view(batch_size, num_candidates)
 

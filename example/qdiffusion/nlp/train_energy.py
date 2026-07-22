@@ -64,6 +64,12 @@ def parse_args() -> argparse.Namespace:
             "edlm_pair for a head-only scalar-vs-BM comparison."
         ),
     )
+    parser.add_argument(
+        "--energy-pooling",
+        choices=("mean", "attention"),
+        default="mean",
+        help="Pooling used by the joint EDLM pair encoder for BM energy.",
+    )
     parser.add_argument("--bm-num-visible", type=int, default=64)
     parser.add_argument("--bm-num-hidden", type=int, default=32)
     parser.add_argument(
@@ -507,6 +513,12 @@ def main() -> None:
         raise ValueError(
             "Scalar EDLM energy requires --energy-feature-mode edlm_pair."
         )
+    if args.energy_type != "bm" and args.energy_pooling != "mean":
+        raise ValueError("Attention pooling is only available for BM energy.")
+    if energy_feature_mode != "edlm_pair" and args.energy_pooling != "mean":
+        raise ValueError(
+            "Attention pooling requires --energy-feature-mode edlm_pair."
+        )
     if args.seed is None:
         args.seed = secrets.randbelow(2**31)
     print(json.dumps({"resolved_seed": args.seed}))
@@ -555,6 +567,7 @@ def main() -> None:
         bm_num_hidden=args.bm_num_hidden,
         bm_scoring_mode=args.bm_scoring_mode,
         bm_visible_transform=args.bm_visible_transform,
+        energy_pooling=args.energy_pooling,
         num_candidates=args.num_candidates,
         dtype=torch.float32,
         device=device,

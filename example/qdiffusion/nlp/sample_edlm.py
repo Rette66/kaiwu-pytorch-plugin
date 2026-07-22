@@ -102,6 +102,7 @@ def _load_energy(
         use_energy=True,
         energy_type=energy_type,
         energy_feature_mode=metadata.get("feature_mode", "edlm_pair"),
+        energy_pooling=metadata.get("pooling_mode", "mean"),
         energy_backbone=energy_backbone,
         bm_num_visible=int(metadata.get("bm_num_visible", 64)),
         bm_num_hidden=int(metadata.get("bm_num_hidden", 32)),

@@ -30,6 +30,7 @@ def build_mdlm_qdiffusion(
     bm_sampler_kwargs: dict[str, Any] | None = None,
     bm_scoring_mode: str = "sampler",
     bm_visible_transform: str = "sigmoid",
+    energy_pooling: str = "mean",
     num_candidates: int = 1,
     proposal_temperature: float = 0.0,
     proposal_noise_scale: float = 1.0,
@@ -71,6 +72,7 @@ def build_mdlm_qdiffusion(
                 scoring_mode=bm_scoring_mode,
                 visible_transform=bm_visible_transform,
                 feature_mode=energy_feature_mode,
+                pooling_mode=energy_pooling,
             )
         else:
             raise ValueError("energy_type must be 'scalar' or 'bm'.")

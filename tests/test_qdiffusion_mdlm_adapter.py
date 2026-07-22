@@ -534,6 +534,33 @@ def test_bm_can_replace_only_the_edlm_scalar_head():
     assert energy_model.conditioned_encoder.input_projection.weight.grad is not None
 
 
+def test_bm_edlm_pair_supports_trainable_attention_pooling():
+    backbone = MDLMBackbone(EDLMFakeMDLM(), FakeTokenizer(), mask_id=5)
+    energy_model = RecordingMDLMEnergy(
+        backbone,
+        bm_num_visible=2,
+        bm_num_hidden=1,
+        sampler=object(),
+        feature_mode="edlm_pair",
+        pooling_mode="attention",
+    )
+    noisy_tokens = torch.tensor([[1, 5, 5]])
+    candidate_tokens = torch.tensor([[1, 3, 0]])
+    attention_mask = candidate_tokens.ne(0)
+
+    energy = energy_model.score_conditioned(
+        noisy_tokens,
+        candidate_tokens,
+        attention_mask,
+    )
+    energy.sum().backward()
+
+    pool_attention = energy_model.conditioned_encoder.pool_attention
+    assert pool_attention is not None
+    assert pool_attention.weight.grad is not None
+    assert energy_model.checkpoint_metadata()["pooling_mode"] == "attention"
+
+
 def test_sampler_bm_energy_keeps_straight_through_visible_gradients():
     backbone = MDLMBackbone(EDLMFakeMDLM(), FakeTokenizer(), mask_id=5)
     energy_model = MDLMConditionedEnergyModel(
