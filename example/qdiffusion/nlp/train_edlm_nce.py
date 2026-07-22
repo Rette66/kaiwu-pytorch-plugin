@@ -362,14 +362,14 @@ def capture_rng_state(
         "python": random.getstate(),
         "numpy": {
             "bit_generator": numpy_name,
-            "keys": torch.from_numpy(numpy_keys.copy()),
+            "keys": numpy_keys.tolist(),
             "position": int(numpy_position),
             "has_gauss": int(numpy_has_gauss),
             "cached_gaussian": float(numpy_cached),
         },
-        "torch_cpu": torch.get_rng_state(),
-        "torch_cuda": torch.cuda.get_rng_state(device),
-        "loader_generator": loader_generator.get_state(),
+        "torch_cpu": torch.get_rng_state().tolist(),
+        "torch_cuda": torch.cuda.get_rng_state(device).tolist(),
+        "loader_generator": loader_generator.get_state().tolist(),
     }
 
 
@@ -386,15 +386,20 @@ def restore_rng_state(
     np.random.set_state(
         (
             numpy_state["bit_generator"],
-            numpy_state["keys"].cpu().numpy().astype(np.uint32, copy=False),
+            np.asarray(numpy_state["keys"], dtype=np.uint32),
             numpy_state["position"],
             numpy_state["has_gauss"],
             numpy_state["cached_gaussian"],
         )
     )
-    torch.set_rng_state(state["torch_cpu"])
-    torch.cuda.set_rng_state(state["torch_cuda"], device=device)
-    loader_generator.set_state(state["loader_generator"])
+    torch.set_rng_state(torch.tensor(state["torch_cpu"], dtype=torch.uint8))
+    torch.cuda.set_rng_state(
+        torch.tensor(state["torch_cuda"], dtype=torch.uint8),
+        device=device,
+    )
+    loader_generator.set_state(
+        torch.tensor(state["loader_generator"], dtype=torch.uint8)
+    )
 
 
 def publish_latest_checkpoint(snapshot: Path, latest: Path) -> None:
