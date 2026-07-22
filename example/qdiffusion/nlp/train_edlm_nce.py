@@ -355,9 +355,18 @@ def capture_rng_state(
 ) -> dict[str, Any]:
     """Captures every RNG stream that can affect the next optimizer step."""
 
+    numpy_name, numpy_keys, numpy_position, numpy_has_gauss, numpy_cached = (
+        np.random.get_state()
+    )
     return {
         "python": random.getstate(),
-        "numpy": np.random.get_state(),
+        "numpy": {
+            "bit_generator": numpy_name,
+            "keys": torch.from_numpy(numpy_keys.copy()),
+            "position": int(numpy_position),
+            "has_gauss": int(numpy_has_gauss),
+            "cached_gaussian": float(numpy_cached),
+        },
         "torch_cpu": torch.get_rng_state(),
         "torch_cuda": torch.cuda.get_rng_state(device),
         "loader_generator": loader_generator.get_state(),
@@ -373,7 +382,16 @@ def restore_rng_state(
     """Restores a rank-local checkpoint RNG state exactly."""
 
     random.setstate(state["python"])
-    np.random.set_state(state["numpy"])
+    numpy_state = state["numpy"]
+    np.random.set_state(
+        (
+            numpy_state["bit_generator"],
+            numpy_state["keys"].cpu().numpy().astype(np.uint32, copy=False),
+            numpy_state["position"],
+            numpy_state["has_gauss"],
+            numpy_state["cached_gaussian"],
+        )
+    )
     torch.set_rng_state(state["torch_cpu"])
     torch.cuda.set_rng_state(state["torch_cuda"], device=device)
     loader_generator.set_state(state["loader_generator"])
