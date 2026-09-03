@@ -190,25 +190,6 @@ class ContextualEnergyModel(EnergyModel):
             ValueError: If input sequence shapes are inconsistent or too long.
         """
 
-        if (
-            hidden_states.ndim != 3
-            or noisy_features.ndim != 3
-            or candidate_features.ndim != 3
-        ):
-            raise ValueError(
-                "hidden_states, noisy_features, and candidate_features must be "
-                "[batch, sequence, feature]"
-            )
-        if (
-            hidden_states.shape[:2] != noisy_features.shape[:2]
-            or hidden_states.shape[:2] != candidate_features.shape[:2]
-        ):
-            raise ValueError("context and token sequence shapes must match")
-        if attention_mask.shape != hidden_states.shape[:2]:
-            raise ValueError("attention_mask must match [batch, seq]")
-        if hidden_states.size(1) > self.max_sequence_length:
-            raise ValueError("candidate sequence exceeds max_sequence_length")
-
         valid_mask = attention_mask.bool()
         dtype = self.hidden_token_projector.weight.dtype
         hidden = self.hidden_token_projector(hidden_states.to(dtype))
@@ -260,16 +241,18 @@ class ContextualEnergyModel(EnergyModel):
             or candidate_features is None
         ):
             raise ValueError("contextual scoring requires hidden and token features")
-        if noisy_tokens.shape != candidate_tokens.shape:
+        if (
+            noisy_tokens.shape != candidate_tokens.shape
+            or attention_mask.shape != candidate_tokens.shape
+            or noisy_features.shape[:2] != noisy_tokens.shape
+            or candidate_features.shape[:2] != candidate_tokens.shape
+        ):
             raise ValueError(
-                "noisy_tokens and candidate_tokens must have the same shape"
+                "candidates, attention_mask, and token features must share the "
+                "token shape"
             )
-        if attention_mask.shape != candidate_tokens.shape:
-            raise ValueError("attention_mask must match candidate_tokens")
-        if noisy_features.shape[:2] != noisy_tokens.shape:
-            raise ValueError("noisy_features must match noisy_tokens")
-        if candidate_features.shape[:2] != candidate_tokens.shape:
-            raise ValueError("candidate_features must match candidate_tokens")
+        if candidate_tokens.size(-1) > self.max_sequence_length:
+            raise ValueError("candidate sequence exceeds max_sequence_length")
         changed = noisy_tokens.ne(candidate_tokens).unsqueeze(-1)
         candidate_features = torch.where(changed, candidate_features, noisy_features)
         visible = self.build_visible_logits(
