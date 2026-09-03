@@ -35,7 +35,7 @@
 |---|---|
 | `proposal.py` | `NativeGenerationSession`(上下文管理器,包装原生 generate 的 cache/去噪/停止)、`ProposalStep`/`ProposalDecision` 快照——hook 机制的地基 |
 | `candidates.py` | Gumbel 混合候选生成、proposal logprob 打分、多样性迁移候选构建 |
-| `guidance.py` | `ContextualEnergyHook`(在 transfer 决策点调用 `QDiffusion.energy` 打分并按 residual 规则覆盖/放行)+ `build_nemotron_qdiffusion`/`load_nemotron_guidance` 组装 |
+| `guidance.py` | `ContextualEnergyHook`(在 transfer 决策点调用 `ContextualEnergyModel.score_conditioned` 具名打分,按 residual 规则覆盖/放行)+ `build_nemotron_qdiffusion`/`load_nemotron_guidance` 组装 |
 
 ### 其他
 
@@ -48,7 +48,7 @@
 
 ### `src/kaiwu/torch_plugin`(发布包)
 
-- `qdiffusion.py`:`score_visible_logits(num_lowest=...)` 支持只取最低 N 个解的能量均值;`QDiffusion.energy()` 作为上下文门面,只把非 None 的上下文条目转发给能量模型(无上下文模型收到上下文会 TypeError,而非静默忽略);`train()` 保证冻结的 proposal 保持 eval 模式;删除无消费者的 `weight`/`temperature`/`history` API;全函数补齐 Google 风格 docstring
+- `qdiffusion.py`:`score_visible_logits(num_lowest=...)` 支持只取最低 N 个解的能量均值;`energy()` 保持无上下文的三参签名——上下文条件是能量模型的固有能力,由 `ContextualEnergyModel.score_conditioned` 具名接收,nemotron 推理直达模型调用(无上下文模型收到上下文会 TypeError,而非静默忽略);`train()` 保证冻结的 proposal 保持 eval 模式;删除无消费者的 `weight`/`temperature`/`history` API;全函数补齐 Google 风格 docstring
 - `__init__.py`:`SequenceTokenSpec` 加入包级导出
 - `_qdiffusion_sampling.py`:仅文件头调整
 - `abstract/full_boltzmann_machine.py`:本分支无改动(BM 设备修复在独立分支 `fix/bm-device-sync`)

@@ -125,10 +125,12 @@ class ContextualEnergyHook:
         expanded_mask = scoring_mask.unsqueeze(0).expand(candidates.shape[0], -1)
         noisy_features = self.token_feature_provider(noisy_tokens)
         candidate_features = self.token_feature_provider(candidates)
-        energies = self.qdiffusion.energy(
-            noisy_tokens,
-            candidates,
-            expanded_mask,
+        # Contextual scoring is a model-level capability: the hook calls the
+        # energy model directly with named context arguments.
+        energies = self.qdiffusion.energy_model.score_conditioned(
+            noisy_tokens=noisy_tokens,
+            candidate_tokens=candidates,
+            attention_mask=expanded_mask,
             hidden_states=hidden_states,
             noisy_features=noisy_features,
             candidate_features=candidate_features,

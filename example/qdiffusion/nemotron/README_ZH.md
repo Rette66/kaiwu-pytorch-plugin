@@ -32,7 +32,7 @@ prepare_pairs ──► same-state OutcomePair (pairs.pt)
                          ▼
                        best.pt
                          │
-frozen Nemotron 原生 generate ─► ContextualEnergyHook ─► QDiffusion.energy ─► token decision
+frozen Nemotron 原生 generate ─► ContextualEnergyHook ─► ContextualEnergyModel 打分 ─► token decision
                          │
                          ▼
                     evaluate.py

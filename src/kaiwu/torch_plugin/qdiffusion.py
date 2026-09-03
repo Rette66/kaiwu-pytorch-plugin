@@ -453,10 +453,6 @@ class QDiffusion(nn.Module):
         noisy_tokens: torch.Tensor,
         candidate_tokens: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
-        *,
-        hidden_states: torch.Tensor | None = None,
-        noisy_features: torch.Tensor | None = None,
-        candidate_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Scores candidate reconstructions conditioned on the noisy state.
 
@@ -467,35 +463,16 @@ class QDiffusion(nn.Module):
 
             attention_mask: Optional attention mask for the energy model.
 
-            hidden_states: Optional contextual states from the proposal model.
-
-            noisy_features: Optional features for the current noisy tokens.
-
-            candidate_features: Optional features for the candidate tokens.
-
-            Only non-``None`` context entries are forwarded to the energy
-            model, so context-free models are never handed context keywords.
-
         Returns:
             torch.Tensor: A tensor of scalar energies with shape ``[batch, 1]``.
         """
         if attention_mask is None:
             attention_mask = candidate_tokens.ne(self.pad_id)
 
-        context = {
-            key: value
-            for key, value in (
-                ("hidden_states", hidden_states),
-                ("noisy_features", noisy_features),
-                ("candidate_features", candidate_features),
-            )
-            if value is not None
-        }
         return self.energy_model.score_conditioned(
             noisy_tokens=noisy_tokens,
             candidate_tokens=candidate_tokens,
             attention_mask=attention_mask,
-            **context,
         )
 
     def objective(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
