@@ -76,34 +76,42 @@ class ContextualEnergyModel(EnergyModel):
         sampler: Any | None = None,
         device: str | torch.device = "cpu",
     ) -> None:
-        if contextual_layers <= 0:
-            raise ValueError("contextual_layers must be positive")
-        if contextual_dim <= 0 or contextual_heads <= 0:
-            raise ValueError("contextual_dim and contextual_heads must be positive")
+        positive = {
+            "contextual_layers": contextual_layers,
+            "contextual_dim": contextual_dim,
+            "contextual_heads": contextual_heads,
+            "contextual_ffn_dim": contextual_ffn_dim,
+            "max_sequence_length": max_sequence_length,
+            "bm_num_visible": bm_num_visible,
+            "bm_num_hidden": bm_num_hidden,
+            "sa_num_solutions": sa_num_solutions,
+            "energy_num_lowest": energy_num_lowest,
+        }
+        invalid = sorted(name for name, value in positive.items() if value <= 0)
+        if invalid:
+            raise ValueError(f"hyperparameters must be positive, got: {invalid}")
         if contextual_dim % contextual_heads:
-            raise ValueError("contextual_dim must be divisible by contextual_heads")
-        if contextual_ffn_dim <= 0 or max_sequence_length <= 0:
+            # MultiheadAttention 仅在此处抛 AssertionError,且 python -O 下
+            # assert 会被剥离,提前以 ValueError 报出保持错误类型一致。
             raise ValueError(
-                "contextual_ffn_dim and max_sequence_length must be positive"
+                "contextual_dim must be divisible by contextual_heads"
             )
-        if energy_num_lowest <= 0:
-            raise ValueError("energy_num_lowest must be positive")
 
-        self.proposal_hidden_dim = int(proposal_hidden_dim)
-        self.candidate_feature_dim = int(candidate_feature_dim)
-        self.contextual_dim = int(contextual_dim)
-        self.contextual_layers = int(contextual_layers)
-        self.contextual_heads = int(contextual_heads)
-        self.contextual_ffn_dim = int(contextual_ffn_dim)
-        self.contextual_dropout = float(contextual_dropout)
-        self.max_sequence_length = int(max_sequence_length)
-        self.sa_seed = int(sa_seed)
-        self.energy_num_lowest = int(energy_num_lowest)
+        self.proposal_hidden_dim = proposal_hidden_dim
+        self.candidate_feature_dim = candidate_feature_dim
+        self.contextual_dim = contextual_dim
+        self.contextual_layers = contextual_layers
+        self.contextual_heads = contextual_heads
+        self.contextual_ffn_dim = contextual_ffn_dim
+        self.contextual_dropout = contextual_dropout
+        self.max_sequence_length = max_sequence_length
+        self.sa_seed = sa_seed
+        self.energy_num_lowest = energy_num_lowest
 
         sampler_kwargs = {
-            "size_limit": int(sa_num_solutions),
-            "rand_seed": int(sa_seed),
-            "process_num": min(int(sa_num_solutions), 3),
+            "size_limit": sa_num_solutions,
+            "rand_seed": sa_seed,
+            "process_num": min(sa_num_solutions, 3),
             **(sa_kwargs or {}),
         }
         self.sa_kwargs = sampler_kwargs
