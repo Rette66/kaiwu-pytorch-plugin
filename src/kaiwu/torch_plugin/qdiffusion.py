@@ -97,6 +97,17 @@ class EnergyModel(nn.Module):
         bm_num_hidden: int | None = None,
         sampler: Any | None = None,
     ) -> None:
+        """Initializes the shared BM bookkeeping for energy models.
+
+        Args:
+            bm_num_visible: Number of BM visible units; ``None`` for models
+                without an internal BM.
+
+            bm_num_hidden: Number of BM hidden units; ``None`` disables BM
+                construction.
+
+            sampler: Kaiwu sampler used to draw BM hidden states.
+        """
         super().__init__()
         self.bm_num_visible = bm_num_visible
         self.bm_num_hidden = bm_num_hidden
@@ -111,7 +122,18 @@ class EnergyModel(nn.Module):
         candidate_tokens: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Runs conditioned energy scoring through the PyTorch module API."""
+        """Runs conditioned energy scoring through the PyTorch module API.
+
+        Args:
+            noisy_tokens: Noisy conditioning token ids.
+
+            candidate_tokens: Candidate token ids to score.
+
+            attention_mask: Padding mask over token positions.
+
+        Returns:
+            torch.Tensor: One scalar energy per candidate row.
+        """
         return self.score_conditioned(
             noisy_tokens=noisy_tokens,
             candidate_tokens=candidate_tokens,
@@ -124,21 +146,55 @@ class EnergyModel(nn.Module):
         candidate_tokens: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Scores candidates for one noisy state."""
+        """Scores candidates for one noisy state.
+
+        Args:
+            noisy_tokens: Noisy conditioning token ids.
+
+            candidate_tokens: Candidate token ids to score.
+
+            attention_mask: Padding mask over token positions.
+
+        Returns:
+            torch.Tensor: One scalar energy per candidate row.
+
+        Raises:
+            NotImplementedError: Always; subclasses must override this
+                method.
+        """
         del noisy_tokens, candidate_tokens, attention_mask
         raise NotImplementedError(
             "EnergyModel subclasses must implement score_conditioned()."
         )
 
     def discretize_visible_state(self, visible_logits: torch.Tensor) -> torch.Tensor:
-        """Converts visible logits into normalized BM visible conditions."""
+        """Converts visible logits into normalized BM visible conditions.
+
+        Args:
+            visible_logits: Raw visible-unit logits.
+
+        Returns:
+            torch.Tensor: Visible conditions in ``[0, 1]`` via sigmoid.
+        """
         return torch.sigmoid(visible_logits)
 
     def sample_hidden_state(
         self,
         visible_state: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Samples BM hidden states for each visible assignment."""
+        """Samples BM hidden states for each visible assignment.
+
+        Args:
+            visible_state: Visible conditions shaped ``[batch, num_visible]``.
+
+        Returns:
+            tuple: Stacked full states of shape
+            ``[total_solutions, num_nodes]`` plus a per-row solution-count
+            tensor used to split them again.
+
+        Raises:
+            RuntimeError: If the BM or the sampler is not configured.
+        """
         if not hasattr(self, "energy_bm") or self.sampler is None:
             raise RuntimeError(
                 "BM hidden-state sampling requires bm_num_visible, "
@@ -166,6 +222,13 @@ class EnergyModel(nn.Module):
         visible_state: torch.Tensor,
         hidden_state: torch.Tensor,
     ) -> None:
+        """Records lightweight sampler diagnostics from the last score call.
+
+        Args:
+            visible_state: Visible states drawn during the last pass.
+
+            hidden_state: Hidden states sampled during the last pass.
+        """
         self._last_stats = {
             "sampling_mode": torch.tensor(
                 1.0,
@@ -177,7 +240,12 @@ class EnergyModel(nn.Module):
         }
 
     def get_last_stats(self) -> dict[str, torch.Tensor]:
-        """Returns lightweight sampler diagnostics from the last score call."""
+        """Returns lightweight sampler diagnostics from the last score call.
+
+        Returns:
+            dict[str, torch.Tensor]: Copy of the recorded sampling
+            statistics; empty before the first scoring call.
+        """
         return dict(self._last_stats)
 
     def score_visible_logits(
@@ -187,8 +255,21 @@ class EnergyModel(nn.Module):
     ) -> torch.Tensor:
         """Scores visible logits under the conditioned BM energy model.
 
-        When ``num_lowest`` is set, averages only that many lowest-energy
-        samples for each visible assignment.
+        Samples hidden states conditioned on the discretized visible state,
+        evaluates the BM energy for every solution, and averages.
+
+        Args:
+            visible_logits: Visible-unit logits shaped
+                ``[batch, num_visible]``.
+
+            num_lowest: When set, averages only that many lowest-energy
+                solutions per row instead of all of them.
+
+        Returns:
+            torch.Tensor: Energy per row shaped ``[batch, 1]``.
+
+        Raises:
+            RuntimeError: If ``bm_num_visible`` is not configured.
         """
         if self.bm_num_visible is None:
             raise RuntimeError("BM visible-logit scoring requires bm_num_visible.")
@@ -253,6 +334,43 @@ class QDiffusion(nn.Module):
         device: torch.device | str | None = None,
         freeze_proposal: bool = True,
     ) -> None:
+        """Assembles the guided generator from proposal and energy models.
+
+        Args:
+            proposal_model: Proposal backbone producing candidate logits;
+                frozen by default.
+
+            energy_model: Energy-side scorer used for candidate reranking.
+
+            token_spec: Token metadata carrying the tokenizer and
+                special-token ids.
+
+            config: Generation/training configuration; defaults apply when
+                omitted.
+
+            dtype: Floating dtype applied when a device move is requested.
+
+            device: Device to place parameters on; ``None`` keeps the
+                current placement.
+
+            freeze_proposal: Whether to freeze proposal parameters and keep
+                the proposal in eval mode.
+
+        Attributes:
+            tokenizer: Shortcut to ``token_spec.tokenizer``.
+
+            mask_id: Mask token id from the spec.
+
+            pad_id: Padding token id from the spec.
+
+            bos_id: Beginning-of-sequence token id from the spec.
+
+            eos_id: End-of-sequence token id from the spec.
+
+            x_id: Unknown-token id from the spec.
+
+            device: Resolved device of the module parameters.
+        """
         super().__init__()
         self.proposal_model = proposal_model
         self.energy_model = energy_model
