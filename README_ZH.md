@@ -123,7 +123,9 @@ flowchart TD
 
 #### FlagOS 上运行 QDiffusion（NVIDIA 4090）
 
-先按 [Torch-FL 安装说明](https://github.com/flagos-ai/Torch-FL/blob/main/docs/getting-started/installation.md) 安装 NVIDIA 版 `torch_fl`，再安装本项目和 `example/qdiffusion/requirements.txt`。H3C 已验证的组合为 Python 3.12、`torch_fl==2.10.0+cuda13.3`、NVIDIA 版 `flagtree==0.7.0`、`torch==2.10.0+cpu`。Kaiwu SDK 1.3.1 放在独立的 Python 3.10 环境；`KaiwuProcessSampler` 连接其中的模拟退火求解器。
+先按 [Torch-FL 安装说明](https://github.com/flagos-ai/Torch-FL/blob/main/docs/getting-started/installation.md) 安装 NVIDIA 版 `torch_fl`，再安装本项目和 `example/qdiffusion/requirements.txt`。H3C 已验证的组合为 Python 3.12、`torch_fl==2.10.0+cuda13.3`、NVIDIA 版 `flagtree==0.7.0`、`torch==2.10.0+cpu`。Kaiwu SDK 1.3.1 放在独立的 Python 3.10 环境；`kaiwu.torch_plugin.compat.KaiwuProcessSampler` 连接其中的模拟退火求解器。
+
+版本适配代码集中在 `src/kaiwu/torch_plugin/compat/`，相关检查放在 `tests/compat/`。两个示例只调用适配入口，模型算法保持原样。
 
 H3C 上运行真实 DPLM 示例时，设置运行库路径及两个算子的 NVIDIA 原生路由：
 

@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from ._solver_protocol import receive_array, send_array
-from .usage_stats import is_usage_stats_enabled
+from ..usage_stats import is_usage_stats_enabled
 
 
 class KaiwuProcessSampler:

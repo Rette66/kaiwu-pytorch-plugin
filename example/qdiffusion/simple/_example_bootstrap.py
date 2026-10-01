@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import importlib
+import os
 from pathlib import Path
 import sys
+
+if os.environ.get("KPP_DEVICE") == "flagos":
+    importlib.import_module("torch_fl")
 
 
 # Path bootstrap helper.

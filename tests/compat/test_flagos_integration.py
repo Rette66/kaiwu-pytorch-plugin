@@ -14,11 +14,11 @@ from torch import nn  # noqa: E402
 from kaiwu.torch_plugin import (  # noqa: E402
     BoltzmannMachine,
     EnergyModel,
-    KaiwuProcessSampler,
     QDiffusion,
     QDiffusionConfig,
     RestrictedBoltzmannMachine,
 )
+from kaiwu.torch_plugin.compat import KaiwuProcessSampler  # noqa: E402
 from kaiwu.torch_plugin.qdiffusion import SequenceTokenSpec  # noqa: E402
 
 

@@ -14,16 +14,12 @@ This script intentionally keeps only the smallest useful training path:
 
 from __future__ import annotations
 
-import importlib
 import os
 from pathlib import Path
 import sys
 
-# Torch-FL must register before torch; the example paths must precede local imports.
+# The path bootstrap must precede imports from the local example package.
 # pylint: disable=wrong-import-position
-if os.environ.get("KPP_DEVICE") == "flagos":
-    importlib.import_module("torch_fl")
-
 from _example_bootstrap import ensure_repo_src_on_path
 import torch
 from torch.optim import AdamW
@@ -31,7 +27,7 @@ from torch.optim import AdamW
 ensure_repo_src_on_path()
 
 from dplm.utils.dplm_builder import build_qdiffusion
-from kaiwu.torch_plugin import KaiwuProcessSampler
+from kaiwu.torch_plugin.compat import create_flagos_sampler
 
 # Path and data helpers.
 
@@ -128,11 +124,7 @@ def main() -> None:
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"Using device: {device}")
 
-    sampler = (
-        KaiwuProcessSampler(os.environ["KAIWU_PY310"], alpha=0.95, size_limit=10)
-        if device.type == "flagos"
-        else None
-    )
+    sampler = create_flagos_sampler(device)
     generator = build_qdiffusion(
         proposal_ckpt=proposal_ckpt,
         energy_ckpt=energy_ckpt,
