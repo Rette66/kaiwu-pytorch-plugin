@@ -78,9 +78,8 @@ flowchart TD
 
 ### 环境要求
 
-- python == 3.10
-- kaiwu == 1.3.1
-- torch == 2.7.0
+- 常规 Kaiwu SDK 环境：Python 3.10、Kaiwu 1.3.1、PyTorch 2.7.0
+- FlagOS 模型环境：按设备安装对应的 `torch_fl` 和 PyTorch 2.10；Python 版本以 FlagOS 对应设备的要求为准，NVIDIA 已在 Python 3.12 上验证
 - numpy == 2.2.6
 
 ### 代码风格
@@ -114,13 +113,34 @@ flowchart TD
    pip install -r requirements/requirements.txt
    ```
 
-   Kaiwu SDK 需要单独安装，见下方说明。
+   Python 3.10 会安装 Kaiwu SDK；Python 3.12 会跳过，求解器请放在独立的 Python 3.10 环境。
 
 4. **安装插件**
 
    ```bash
    pip install .
    ```
+
+#### FlagOS 上运行 QDiffusion（NVIDIA 4090）
+
+先按 [Torch-FL 安装说明](https://github.com/flagos-ai/Torch-FL/blob/main/docs/getting-started/installation.md) 安装 NVIDIA 版 `torch_fl`，再安装本项目和 `example/qdiffusion/requirements.txt`。H3C 已验证的组合为 Python 3.12、`torch_fl==2.10.0+cuda13.3`、NVIDIA 版 `flagtree==0.7.0`、`torch==2.10.0+cpu`。Kaiwu SDK 1.3.1 放在独立的 Python 3.10 环境；`KaiwuProcessSampler` 连接其中的模拟退火求解器。
+
+H3C 上运行真实 DPLM 示例时，设置运行库路径及两个算子的 NVIDIA 原生路由：
+
+```bash
+SITE=$(python -c 'import site; print(site.getsitepackages()[0])')
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+export LD_LIBRARY_PATH="$SITE/torch_fl/lib:$SITE/nvidia/cu13/lib:$SITE/torch/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export FLAGOS_OP_mul__Tensor=cuda
+export FLAGOS_OP_native_layer_norm_backward=cuda
+export KPP_DEVICE=flagos
+export KAIWU_PY310=/path/to/python3.10
+
+python example/qdiffusion/simple/simple_train_example.py /path/to/dplm_150m /path/to/input.fasta
+python example/qdiffusion/simple/simple_generate_example.py /path/to/dplm_150m /path/to/input.fasta
+```
+
+不设置 `KPP_DEVICE` 时，两个示例仍按原方式选择 CUDA 或 CPU。本次只验证了 NVIDIA 4090。
 
 #### 方式二：Docker 配置（无需本地配适环境）
 
@@ -163,7 +183,7 @@ requirements/
    docker compose down
    ```
 
-### Kaiwu SDK 安装说明（必需）
+### Kaiwu SDK 安装说明（常规环境或独立求解器）
 
 现在kaiwu版本1.3.1可以直接通过`pip install kaiwu==1.3.1`来安装
 

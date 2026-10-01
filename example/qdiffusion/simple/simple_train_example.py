@@ -14,7 +14,15 @@ This script intentionally keeps only the smallest useful training path:
 
 from __future__ import annotations
 
+import importlib
+import os
 from pathlib import Path
+import sys
+
+# Torch-FL must register before torch; the example paths must precede local imports.
+# pylint: disable=wrong-import-position
+if os.environ.get("KPP_DEVICE") == "flagos":
+    importlib.import_module("torch_fl")
 
 from _example_bootstrap import ensure_repo_src_on_path
 import torch
@@ -23,6 +31,7 @@ from torch.optim import AdamW
 ensure_repo_src_on_path()
 
 from dplm.utils.dplm_builder import build_qdiffusion
+from kaiwu.torch_plugin import KaiwuProcessSampler
 
 # Path and data helpers.
 
@@ -108,19 +117,26 @@ def main() -> None:
     mini-batch from the bundled FASTA, and optimizes the EBM objective for a
     few steps.
     """
-    proposal_ckpt = "airkingbd/dplm_150m"
-    energy_ckpt = "airkingbd/dplm_150m"
-    fasta_path = default_fasta_path()
+    proposal_ckpt = sys.argv[1] if len(sys.argv) > 1 else "airkingbd/dplm_150m"
+    energy_ckpt = proposal_ckpt
+    fasta_path = Path(sys.argv[2]) if len(sys.argv) > 2 else default_fasta_path()
     batch_size = 2
     num_steps = 3
     learning_rate = 1e-4
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device_name = os.environ.get("KPP_DEVICE")
+    device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"Using device: {device}")
 
+    sampler = (
+        KaiwuProcessSampler(os.environ["KAIWU_PY310"], alpha=0.95, size_limit=10)
+        if device.type == "flagos"
+        else None
+    )
     generator = build_qdiffusion(
         proposal_ckpt=proposal_ckpt,
         energy_ckpt=energy_ckpt,
+        bm_sampler=sampler,
         num_candidates=4,
         freeze_proposal=True,
     ).to(device)
@@ -168,6 +184,9 @@ def main() -> None:
             f"logits_shape={tuple(outputs['logits'].shape)} "
             f"masked_positions={int(outputs['loss_mask'].sum().item())}"
         )
+
+    if sampler is not None:
+        sampler.close()
 
 
 if __name__ == "__main__":

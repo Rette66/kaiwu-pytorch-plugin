@@ -20,7 +20,10 @@ class AbstractBoltzmannMachine(torch.nn.Module):
     def __init__(self, device=None) -> None:
         super().__init__()
         if device is None:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            if hasattr(torch, "flagos") and torch.flagos.is_available():
+                self.device = torch.device("flagos")
+            else:
+                self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = device
 
