@@ -40,26 +40,33 @@ class TestReviewPipeline(unittest.TestCase):
 
     def test_completed_response_extracts_only_assistant_text(self):
         """Reasoning and other output items are not a substitute for a report."""
-        response = {"status": "completed", "output": [
-            {"type": "reasoning", "summary": []},
-            {"type": "message", "content": [
-                {"type": "output_text", "text": json.dumps(self.report)}]},
-        ]}
+        response = {"choices": [{"finish_reason": "stop", "message": {
+            "role": "assistant", "content": json.dumps(self.report),
+            "reasoning_content": "Internal analysis is not the JSON report.",
+        }}]}
         self.assertEqual(review.parse_response(response), self.report)
 
     def test_incomplete_and_refused_responses_do_not_pass(self):
         """Partial responses, API errors and refusals cannot become success."""
         for response in (
-            {"status": "incomplete", "output": []},
-            {"status": "failed", "error": {"message": "private"}},
-            {"status": "completed", "output": [{"type": "message", "content": [
-                {"type": "refusal", "refusal": "no"}]}]},
+            {"choices": []},
+            {"error": {"message": "private"}},
+            {"choices": [{"finish_reason": "length", "message": {
+                "content": json.dumps(self.report)}}]},
+            {"choices": [{"finish_reason": "content_filter", "message": {"content": None}}]},
+            {"choices": [{"finish_reason": "stop", "message": {"content": ""}}]},
+            {"choices": [{"finish_reason": "stop", "message": {"content": None}}]},
+            {"choices": [{"finish_reason": "stop", "message": {"content": "not JSON"}}]},
         ):
             with self.subTest(response=response), self.assertRaises(ValueError):
                 review.parse_response(response)
 
-    def test_findings_require_actual_source_evidence(self):
-        """A fluent but invented quotation must be rejected."""
+    def test_report_requires_valid_structure_and_actual_source_evidence(self):
+        """JSON mode must not bypass field checks or accept invented quotations."""
+        for report in (None, [], "text", {}, {**self.report, "verdict": []},
+                       {**self.report, "findings": ["invented problem"]}):
+            with self.subTest(report=report), self.assertRaises(ValueError):
+                review.validate_report(report, self.packet)
         self.report["findings"] = [{
             "severity": "high", "location": "src/model.py", "trigger": "On load",
             "evidence": "invented code", "detail": "Overwrites weights.",
@@ -225,10 +232,9 @@ class TestReviewPipeline(unittest.TestCase):
 
     def test_review_command_uses_structured_api_without_repository_write(self):
         """Exercise the command's API contract and real report files offline."""
-        response = {"status": "completed", "output": [
-            {"type": "message", "content": [
-                {"type": "output_text", "text": json.dumps(self.report)}]},
-        ]}
+        response = {"choices": [{"finish_reason": "stop", "message": {
+            "role": "assistant", "content": json.dumps(self.report),
+        }}]}
         previous = Path.cwd()
         try:
             with tempfile.TemporaryDirectory() as temporary:
@@ -237,7 +243,8 @@ class TestReviewPipeline(unittest.TestCase):
                 event.write_text(json.dumps({"inputs": {"number": "7"}}), encoding="utf-8")
                 env = {"GITHUB_REPOSITORY": "owner/repo", "GITHUB_EVENT_NAME": "workflow_dispatch",
                        "GITHUB_EVENT_PATH": str(event), "GITHUB_TOKEN": "read-token",
-                       "OPENAI_API_KEY": "api-test-token", "GITHUB_STEP_SUMMARY": "summary.md"}
+                       "DEEPSEEK_API_KEY": "api-test-token", "DEEPSEEK_REVIEW_MODEL": "",
+                       "GITHUB_STEP_SUMMARY": "summary.md"}
                 with (
                     patch.dict(os.environ, env),
                     patch.object(sys, "argv", ["ai_review", "review"]),
@@ -249,11 +256,18 @@ class TestReviewPipeline(unittest.TestCase):
                 self.assertTrue(Path("review-packet.json").exists())
                 self.assertIn("没有执行 PR 代码", Path("review.md").read_text(encoding="utf-8"))
                 self.assertEqual(github.call_count, 1)
-                self.assertEqual(request.call_args.args[0], "https://api.openai.com/v1/responses")
+                self.assertEqual(request.call_args.args[0],
+                                 "https://api.deepseek.com/chat/completions")
+                self.assertEqual(request.call_args.args[1], "api-test-token")
                 payload = request.call_args.args[3]
-                self.assertTrue(payload["text"]["format"]["strict"])
+                self.assertEqual(payload["model"], "deepseek-flash")
+                self.assertEqual(payload["response_format"], {"type": "json_object"})
+                self.assertEqual(payload["max_tokens"], 6000)
+                self.assertEqual(payload["reasoning_effort"], "low")
+                self.assertEqual(payload["messages"][0]["role"], "system")
+                self.assertIn('"required"', payload["messages"][0]["content"])
+                self.assertEqual(payload["messages"][1]["role"], "user")
                 self.assertNotIn("tools", payload)
-                self.assertFalse(payload["store"])
         finally:
             os.chdir(previous)
 
