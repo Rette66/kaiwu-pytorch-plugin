@@ -291,5 +291,55 @@ class TestReviewPipeline(unittest.TestCase):
             os.chdir(previous)
 
 
+class TestReviewFailures(unittest.TestCase):
+    """Keep failure diagnostics actionable without exposing private API data."""
+
+    def test_failed_review_explains_the_cause_without_exposing_private_data(self):
+        """An incomplete run must keep an actionable, credential-free reason."""
+        private = "private-api-key-and-provider-content"
+        packet = {"repository": "owner/repo", "number": 7, "kind": "pr",
+                  "ci": {}, "files": [], "incomplete": []}
+        cases = [
+            ({"choices": [{"finish_reason": "length"}]}, "输出长度限制"),
+            ({"choices": []}, "没有返回唯一"),
+            ({"choices": [{"finish_reason": "stop", "message": {"content": ""}}]},
+             "没有返回审核正文"),
+            ({"choices": [{"finish_reason": "stop", "message": {"content": private}}]},
+             "不是有效的 JSON"),
+            ({"choices": [{"finish_reason": "stop", "message": {"content": "{}"}}]},
+             "审核字段不符合要求"),
+            (urllib.error.HTTPError(private, 401, private, {}, None), "HTTP 401"),
+            (urllib.error.URLError(private), "网络请求失败"),
+            (TimeoutError(private), "请求超时"),
+            (ValueError(private), "请求或回答无法处理"),
+        ]
+        previous = Path.cwd()
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                os.chdir(temporary)
+                Path("event.json").write_text('{"inputs": {"number": "7"}}', encoding="utf-8")
+                env = {"GITHUB_REPOSITORY": "owner/repo", "GITHUB_EVENT_NAME": "workflow_dispatch",
+                       "GITHUB_EVENT_PATH": "event.json", "DEEPSEEK_API_KEY": private}
+                for response, reason in cases:
+                    with (
+                        self.subTest(reason=reason), patch.dict(os.environ, env),
+                        patch.object(sys, "argv", ["ai_review", "review"]),
+                        patch.object(review, "github", return_value={}),
+                        patch.object(review, "collect_packet", return_value=packet),
+                        patch.object(review, "request_json", side_effect=(
+                            response if isinstance(response, Exception) else None),
+                            return_value=response),
+                        self.assertRaises(RuntimeError) as failure,
+                    ):
+                        review.main()
+                    body = Path("review.md").read_text(encoding="utf-8")
+                    self.assertIn(reason, str(failure.exception))
+                    self.assertIn(reason, body)
+                    self.assertIn("审核未完成", body)
+                    self.assertNotIn(private, body + str(failure.exception))
+        finally:
+            os.chdir(previous)
+
+
 if __name__ == "__main__":
     unittest.main()

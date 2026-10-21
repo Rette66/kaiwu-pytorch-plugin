@@ -23,6 +23,10 @@ MAX_FILES = 8
 MAX_INPUT = 90000
 
 
+class ReviewError(ValueError):
+    """A fixed diagnostic that is safe to show without provider data or credentials."""
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     """Never forward authorization headers through an HTTP redirect."""
 
@@ -45,7 +49,7 @@ def request_json(url, token, method="GET", payload=None):
     with urllib.request.build_opener(NoRedirect()).open(request, timeout=180) as response:
         content = response.read(5_000_001)
     if len(content) > 5_000_000:
-        raise ValueError("API response exceeds the review size limit")
+        raise ReviewError("API 回答超过读取大小限制")
     return json.loads(content)
 
 
@@ -223,12 +227,19 @@ def report_schema():
 def parse_response(response):
     """Reject API failures, refusals and incomplete JSON rather than invent success."""
     choices = response.get("choices", [])
-    if len(choices) != 1 or choices[0].get("finish_reason") != "stop":
-        raise ValueError("DeepSeek review did not complete")
+    if len(choices) != 1:
+        raise ReviewError("DeepSeek 没有返回唯一的审核结果")
+    reason = choices[0].get("finish_reason")
+    if reason != "stop":
+        reasons = {"length": "DeepSeek 回答达到输出长度限制，未能完整生成",
+                   "content_filter": "DeepSeek 因内容限制中止回答",
+                   "insufficient_system_resource": "DeepSeek 因服务资源不足中止回答",
+                   "aborted": "DeepSeek 中止了回答"}
+        raise ReviewError(reasons.get(reason, "DeepSeek 没有正常结束回答"))
     message = choices[0].get("message", {})
     content = message.get("content")
     if not isinstance(content, str) or not content.strip() or message.get("refusal"):
-        raise ValueError("DeepSeek returned no review")
+        raise ReviewError("DeepSeek 没有返回审核正文，或拒绝了本次审核")
     return json.loads(content)
 
 
@@ -236,30 +247,46 @@ def validate_report(report, packet):
     """Only publish bounded reports with quotations from the collected code."""
     if (not isinstance(report, dict) or set(report) != set(report_schema()["required"])
             or not isinstance(report["verdict"], str) or report["verdict"] not in VERDICTS):
-        raise ValueError("Invalid review fields")
+        raise ReviewError("DeepSeek 返回的审核字段不符合要求")
     if not isinstance(report["summary"], str) or len(report["summary"]) > 5000:
-        raise ValueError("Invalid review summary")
+        raise ReviewError("DeepSeek 返回的审核摘要格式或长度不符合要求")
     for name in ("models", "next_steps"):
         if (not isinstance(report[name], list) or len(report[name]) > 10
                 or any(not isinstance(value, str) or len(value) > 2000
                        for value in report[name])):
-            raise ValueError("Invalid review list")
+            raise ReviewError("DeepSeek 返回的模型或后续步骤格式或长度不符合要求")
     if not isinstance(report["findings"], list) or len(report["findings"]) > 6:
-        raise ValueError("Too many findings")
+        raise ReviewError("DeepSeek 返回的问题列表格式不正确，或超过 6 条")
     for finding in report["findings"]:
         if (not isinstance(finding, dict)
                 or set(finding) != {"severity", "location", "trigger", "evidence", "detail"}
                 or any(not isinstance(value, str) or not value or len(value) > 2000
                        for value in finding.values())
                 or finding["severity"] not in {"high", "medium", "low"}):
-            raise ValueError("Invalid finding")
+            raise ReviewError("DeepSeek 返回的问题缺少必填内容，或格式或长度不符合要求")
         sources = [entry for entry in packet["files"]
                    if entry["filename"] == finding["location"]]
         if not sources or not any(finding["evidence"] in entry.get(key, "")
                                   for entry in sources for key in ("base", "head", "patch")):
-            raise ValueError("Finding is missing an exact source quotation")
+            raise ReviewError("DeepSeek 返回的问题路径或原文引用与实际读取的代码不匹配")
     if len(render_report(report, packet)) > 60000:
-        raise ValueError("Review exceeds the comment size limit")
+        raise ReviewError("审核报告超过评论长度限制")
+
+
+def failure_reason(error):
+    """Expose fixed diagnostics and HTTP status codes, never arbitrary error text."""
+    if isinstance(error, ReviewError):
+        return str(error)
+    if isinstance(error, json.JSONDecodeError):
+        return "DeepSeek 回答不是有效的 JSON，无法读取"
+    if isinstance(error, urllib.error.HTTPError):
+        hint = {401: "请检查密钥", 402: "请检查账户余额", 429: "请求过于频繁，请稍后重试"}
+        return f"DeepSeek 请求失败（HTTP {error.code}）；{hint.get(error.code, '请稍后重试')}"
+    if isinstance(error, TimeoutError):
+        return "DeepSeek 请求超时，请稍后重试"
+    if isinstance(error, urllib.error.URLError):
+        return "DeepSeek 网络请求失败，请稍后重试"
+    return "DeepSeek 请求或回答无法处理，请检查配置后重试"
 
 
 def escaped(value):
@@ -362,17 +389,18 @@ def main():
     try:
         key = os.environ.get("DEEPSEEK_API_KEY")
         if not key:
-            raise ValueError("DEEPSEEK_API_KEY is not configured")
+            raise ReviewError("未配置 DEEPSEEK_API_KEY，请在仓库 Secrets 中添加密钥")
         response = request_json("https://api.deepseek.com/chat/completions", key, "POST", payload)
         report = parse_response(response)
         validate_report(report, packet)
     except (ValueError, urllib.error.URLError, TimeoutError) as error:
         # Do not expose provider response bodies, request headers or credentials.
-        report = {"verdict": "needs_evidence", "summary": "审核未完成，不能作为通过依据。",
+        reason = failure_reason(error)
+        report = {"verdict": "needs_evidence", "summary": f"审核未完成：{reason}。不能作为通过依据。",
                   "models": [], "findings": [],
-                  "next_steps": [f"检查运行日志与 API 配置后重新运行（{type(error).__name__}）。"]}
+                  "next_steps": ["根据上述失败原因处理后重新运行。"]}
         Path("review.md").write_text(render_report(report, packet), encoding="utf-8")
-        raise RuntimeError("AI review did not complete; see review.md") from None
+        raise RuntimeError(f"AI review did not complete: {reason}; see review.md") from None
     body = render_report(report, packet)
     Path("review.md").write_text(body, encoding="utf-8")
     if os.environ.get("GITHUB_STEP_SUMMARY"):
