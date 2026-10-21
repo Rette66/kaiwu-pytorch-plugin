@@ -1,4 +1,4 @@
-"""Review GitHub evidence with OpenAI without executing contributor code."""
+"""Review GitHub evidence with DeepSeek without executing contributor code."""
 
 import argparse
 import base64
@@ -204,7 +204,7 @@ def collect_packet(repository, number, token, ci_result):
 
 
 def report_schema():
-    """Define the small report contract enforced by OpenAI and local checks."""
+    """Describe the JSON report format for the model and local checks."""
     text = {"type": "string"}
     finding = {"type": "object", "additionalProperties": False,
                "properties": {name: text for name in
@@ -222,19 +222,20 @@ def report_schema():
 
 def parse_response(response):
     """Reject API failures, refusals and incomplete JSON rather than invent success."""
-    if response.get("status") != "completed":
-        raise ValueError("OpenAI review did not complete")
-    texts = [part["text"] for item in response.get("output", [])
-             if item.get("type") == "message" for part in item.get("content", [])
-             if part.get("type") == "output_text"]
-    if not texts:
-        raise ValueError("OpenAI returned no review")
-    return json.loads("".join(texts))
+    choices = response.get("choices", [])
+    if len(choices) != 1 or choices[0].get("finish_reason") != "stop":
+        raise ValueError("DeepSeek review did not complete")
+    message = choices[0].get("message", {})
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip() or message.get("refusal"):
+        raise ValueError("DeepSeek returned no review")
+    return json.loads(content)
 
 
 def validate_report(report, packet):
     """Only publish bounded reports with quotations from the collected code."""
-    if set(report) != set(report_schema()["required"]) or report["verdict"] not in VERDICTS:
+    if (not isinstance(report, dict) or set(report) != set(report_schema()["required"])
+            or not isinstance(report["verdict"], str) or report["verdict"] not in VERDICTS):
         raise ValueError("Invalid review fields")
     if not isinstance(report["summary"], str) or len(report["summary"]) > 5000:
         raise ValueError("Invalid review summary")
@@ -246,9 +247,11 @@ def validate_report(report, packet):
     if not isinstance(report["findings"], list) or len(report["findings"]) > 6:
         raise ValueError("Too many findings")
     for finding in report["findings"]:
-        if (set(finding) != {"severity", "location", "trigger", "evidence", "detail"}
+        if (not isinstance(finding, dict)
+                or set(finding) != {"severity", "location", "trigger", "evidence", "detail"}
                 or any(not isinstance(value, str) or not value or len(value) > 2000
-                       for value in finding.values())):
+                       for value in finding.values())
+                or finding["severity"] not in {"high", "medium", "low"}):
             raise ValueError("Invalid finding")
         sources = [entry for entry in packet["files"]
                    if entry["filename"] == finding["location"]]
@@ -347,17 +350,20 @@ def main():
         return
     rules = Path(__file__).with_name("ai-review-rules.md").read_text(encoding="utf-8")
     payload = {
-        "model": os.environ.get("OPENAI_REVIEW_MODEL") or "gpt-5.4",
-        "store": False, "max_output_tokens": 6000,
-        "instructions": rules, "input": json.dumps(packet, ensure_ascii=False),
-        "text": {"format": {"type": "json_schema", "name": "pr_review", "strict": True,
-                            "schema": report_schema()}},
+        "model": os.environ.get("DEEPSEEK_REVIEW_MODEL") or "deepseek-flash",
+        "max_tokens": 6000, "reasoning_effort": "low",
+        "messages": [
+            {"role": "system", "content": rules + "\n\n只返回符合以下结构的 JSON 对象：\n"
+             + json.dumps(report_schema(), ensure_ascii=False)},
+            {"role": "user", "content": json.dumps(packet, ensure_ascii=False)},
+        ],
+        "response_format": {"type": "json_object"},
     }
     try:
-        key = os.environ.get("OPENAI_API_KEY")
+        key = os.environ.get("DEEPSEEK_API_KEY")
         if not key:
-            raise ValueError("OPENAI_API_KEY is not configured")
-        response = request_json("https://api.openai.com/v1/responses", key, "POST", payload)
+            raise ValueError("DEEPSEEK_API_KEY is not configured")
+        response = request_json("https://api.deepseek.com/chat/completions", key, "POST", payload)
         report = parse_response(response)
         validate_report(report, packet)
     except (ValueError, urllib.error.URLError, TimeoutError) as error:

@@ -1,6 +1,6 @@
 # AI 审核：先在自己的 fork 试用
 
-这版自动分析 Issue、PR 代码和已有 CI 结果，输出中文建议。
+这版通过 DeepSeek 自动分析 Issue、PR 代码和已有 CI 结果，输出中文建议。
 不会自动改代码、批准、合并或关闭，也不会执行投稿代码或模型生成的验证代码。
 它能帮助筛选和发现问题，但不能代替独立复现与实验。
 
@@ -8,11 +8,11 @@
 
 1. 将本分支合并到 **Rette66/kaiwu-pytorch-plugin 的默认分支**，不要先提交到上游仓库。
 2. 打开 fork 的 **Settings → Secrets and variables → Actions → Secrets**，
-   新建 `OPENAI_API_KEY`，填入你自己的 OpenAI API 项目密钥。
-   不要把密钥写在文件、评论或聊天中。代码会发送给 OpenAI 进行分析。
+   新建 `DEEPSEEK_API_KEY`，填入你自己的 DeepSeek API 密钥。
+   不要把密钥写在文件、评论或聊天中。代码会发送给 DeepSeek 进行分析。
 3. 在同一页面的 **Variables** 中添加 `AI_REVIEW_ENABLED`，值填 `true`。
-   默认使用 `gpt-5.4`；如需使用账户内其他支持结构化输出的模型，
-   添加 `OPENAI_REVIEW_MODEL`。在 OpenAI 项目侧设置用量提醒及可用的预算限制。
+   默认使用 `deepseek-flash`；如需使用账户内其他支持 JSON 输出的模型，
+   添加 `DEEPSEEK_REVIEW_MODEL`。留意 DeepSeek 账户余额和实际用量。
 4. 若 fork 的 Actions 尚未启用，打开 **Actions** 页面按提示启用。
 5. 在 **Actions → AI review → Run workflow** 选择默认分支，先手动试跑：
 
@@ -45,12 +45,14 @@
 超出范围、内容不可用、没有检查结果、API 失败或回答不完整时，不能给出通过结论。
 大 PR 和没有源代码位置的 Issue 通常会被要求补证据。
 
+DeepSeek 的 JSON 输出不保证字段结构正确，脚本会在本地检查字段、类型和长度。
 每条代码问题必须提供实际读取文件中的逐字引用，引用不存在则本次审核失败。
 这能限制虚构引用，**不能证明 AI 对代码的解释一定正确**。
 重复检索只是标题关键词搜索，不是完整去重，也没有自动读取论文或运行硬件实验。
 现有 CI 成功也不表示作者测试可信、所有测试均执行或模型效果成立。
 
-每次最多调用一次 OpenAI，不自动重试，最多输出 6000 token，工作流最多运行 10 分钟。
+每次最多调用一次 DeepSeek，不自动重试，最多输出 6000 token（含思考），
+使用 `low` 思考强度，工作流最多运行 10 分钟。
 快速更新会取消同一来源的旧任务，但已经发出的 API 请求仍可能计费。
 这限制单次资源，不是账户级费用上限；仍需注意协作者和 PR 触发量及项目用量。
 
@@ -58,15 +60,15 @@
 
 审核代码、规则和工作流取自 fork 默认分支，外部 PR 只作为 API 返回的数据读取。
 不会加载 PR 修改的规则，也不会安装 PR 的依赖或调用其脚本。
-分析任务只有读取 GitHub 的权限，密钥仅提供给调用 OpenAI 的步骤。
-另一个没有 OpenAI 密钥的任务负责更新 fork 评论。原仓库中的普通测试继续独立执行。
+分析任务只有读取 GitHub 的权限，密钥仅提供给调用 DeepSeek 的步骤。
+另一个没有 DeepSeek 密钥的任务负责更新 fork 评论。原仓库中的普通测试继续独立执行。
 
 停用时，将 `AI_REVIEW_ENABLED` 改为 `false`，并取消正在运行的任务。
 无需删除 Issue、PR 或改动模型代码。
 
 ## 本地检查
 
-不需要 OpenAI 密钥、PyTorch 或 Kaiwu：
+不需要 DeepSeek 密钥、PyTorch 或 Kaiwu：
 
 ```bash
 python3 -m unittest discover -s tests -p test_ai_review.py -v
