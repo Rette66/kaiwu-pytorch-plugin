@@ -35,7 +35,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def request_json(url, token, method="GET", payload=None):
+def request_json(url, token, method="GET", payload=None, *, timeout=180):
     """Use fixed API hosts and bounded responses; never execute returned data."""
     headers = {"Accept": "application/json", "Content-Type": "application/json",
                "User-Agent": "kaiwu-ai-review"}
@@ -46,7 +46,7 @@ def request_json(url, token, method="GET", payload=None):
         data=None if payload is None else json.dumps(payload).encode(),
         headers=headers,
     )
-    with urllib.request.build_opener(NoRedirect()).open(request, timeout=180) as response:
+    with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
         content = response.read(5_000_001)
     if len(content) > 5_000_000:
         raise ReviewError("API 回答超过读取大小限制")
@@ -378,7 +378,7 @@ def main():
     rules = Path(__file__).with_name("ai-review-rules.md").read_text(encoding="utf-8")
     payload = {
         "model": os.environ.get("DEEPSEEK_REVIEW_MODEL") or "deepseek-flash",
-        "max_tokens": 16384, "reasoning_effort": "low",
+        "max_tokens": 32768, "reasoning_effort": "low",
         "messages": [
             {"role": "system", "content": rules + "\n\n只返回符合以下结构的 JSON 对象：\n"
              + json.dumps(report_schema(), ensure_ascii=False)},
@@ -390,7 +390,8 @@ def main():
         key = os.environ.get("DEEPSEEK_API_KEY")
         if not key:
             raise ReviewError("未配置 DEEPSEEK_API_KEY，请在仓库 Secrets 中添加密钥")
-        response = request_json("https://api.deepseek.com/chat/completions", key, "POST", payload)
+        response = request_json("https://api.deepseek.com/chat/completions", key, "POST", payload,
+                                timeout=480)
         report = parse_response(response)
         validate_report(report, packet)
     except (ValueError, urllib.error.URLError, TimeoutError) as error:
