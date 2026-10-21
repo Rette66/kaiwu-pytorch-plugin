@@ -262,10 +262,11 @@ class TestReviewPipeline(unittest.TestCase):
                 payload = request.call_args.args[3]
                 self.assertEqual(payload["model"], "deepseek-flash")
                 self.assertEqual(payload["response_format"], {"type": "json_object"})
-                self.assertEqual(payload["max_tokens"], 6000)
+                self.assertEqual(payload["max_tokens"], 16384)
                 self.assertEqual(payload["reasoning_effort"], "low")
                 self.assertEqual(payload["messages"][0]["role"], "system")
                 self.assertIn('"required"', payload["messages"][0]["content"])
+                self.assertIn("summary 最多 300 字", payload["messages"][0]["content"])
                 self.assertEqual(payload["messages"][1]["role"], "user")
                 self.assertNotIn("tools", payload)
         finally:

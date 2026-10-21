@@ -378,7 +378,7 @@ def main():
     rules = Path(__file__).with_name("ai-review-rules.md").read_text(encoding="utf-8")
     payload = {
         "model": os.environ.get("DEEPSEEK_REVIEW_MODEL") or "deepseek-flash",
-        "max_tokens": 6000, "reasoning_effort": "low",
+        "max_tokens": 16384, "reasoning_effort": "low",
         "messages": [
             {"role": "system", "content": rules + "\n\n只返回符合以下结构的 JSON 对象：\n"
              + json.dumps(report_schema(), ensure_ascii=False)},

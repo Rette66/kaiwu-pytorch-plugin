@@ -23,10 +23,13 @@ recommend 仅表示值得继续合并审查，不表示自动批准；有实际�
 - 文件清理是否误删用户文件；安装后的实际使用是否与源代码检查一致。
 - 是否与主分支已有行为重复，是否夹带无关改动或复杂度明显不必要。
 
-输出遵循提供的 JSON 格式：summary 说明实际改动和价值；models 写涉及的模型或功能；
-findings 最多 6 条，每条 severity 为 high/medium/low，location 必须是 files 中的
-完整 filename，trigger 是具体触发条件，evidence 是 base、head 或 patch 中逐字存在的
-非空短引用，detail 解释影响。注意区分旧问题与本 PR 新增问题。
+输出遵循提供的 JSON 格式，不要在 JSON 前后添加说明或重复源码。优先完成完整报告，
+summary 最多 300 字，说明实际改动和价值；models 写涉及的模型或功能；
+findings 最多 3 条，优先列影响最大的可证实问题，每条 severity 为 high/medium/low，
+location 必须是 files 中的完整 filename，trigger 是具体触发条件，
+evidence 是 base、head 或 patch 中逐字存在的
+非空短引用（最多 200 字符），detail 最多 200 字，解释影响。注意区分旧问题与本 PR 新增问题。
 没有足够代码证据时不要生成 findings，改用 next_steps 说明需要补的证据。
-next_steps 最多 6 项，指出最小可行的验证方式，修复类优先要求修改前失败、修改后成功，
+next_steps 最多 3 项，每项最多 100 字，指出最小可行的验证方式，
+修复类优先要求修改前失败、修改后成功，
 新增功能要求真实使用检查。不要机械要求所有任务都运行昂贵实验。
