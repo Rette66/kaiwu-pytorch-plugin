@@ -3,6 +3,7 @@ import sys
 import unittest
 
 import numpy as np
+import pytest
 import torch
 
 src_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../src"))
@@ -232,6 +233,21 @@ class TestGaussianBernoulliRestrictedBoltzmannMachine(unittest.TestCase):
         )
         torch.testing.assert_close(bm.linear_bias.detach(), linear.to(torch.float64))
 
+
+@pytest.mark.parametrize("via_parent", [False, True])
+def test_gbrbm_sampling_after_dtype_conversion(via_parent):
+    """Sampling follows direct and parent-initiated dtype changes."""
+    model = GaussianBernoulliRestrictedBoltzmannMachine(2, 2, device="cpu")
+    target = model
+    if via_parent:
+        target = torch.nn.Module()
+        target.model = model
+    for dtype in (torch.float64, torch.float32):
+        target.to("cpu", dtype=dtype)
+        samples = model.gibbs_sample(n_step=1, n_sample=2)
+        assert samples.shape == (2, 4)
+        assert samples.dtype == dtype
+        assert torch.isfinite(model(samples)).all()
 
 if __name__ == "__main__":
     unittest.main()
